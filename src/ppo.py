@@ -4,6 +4,16 @@ rollout buffer collected from K env copies. CPU-free: all tensors on CUDA.
 
 Each AgentPolicy owns one PPOTrainer. The harness calls collect() (batched GPU
 inference over K envs) and update() (a few epochs of minibatch SGD).
+
+Key stability components (added during debugging — see docs/EXPERIMENTS.md):
+  - RewardNormalizer: Welford online running-std normalizer applied per-agent
+    BEFORE rewards enter the buffer. Raw returns in this env span ~[-30, +600]
+    after 64-step GAE accumulation, which made the value loss explode (300-1600).
+    Normalizing rewards keeps the critic stable (vf loss ~10-50).
+  - Entropy floor: ppo_update_agent takes ent_floor; a term
+    `weight * clamp(ent_floor - ent, 0)` is added to the loss so entropy cannot
+    collapse to 0 (which caused the policy to lock onto a single constant action,
+    e.g. spamming harvest). With 13 actions the max entropy is ln(13)~2.56.
 """
 import torch
 import torch.nn as nn

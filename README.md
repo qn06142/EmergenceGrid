@@ -76,7 +76,20 @@ python tests/test_sanity.py
 - `--d_model 256 --gru_hidden 256 --head_dim 256` — larger model used for the
   trait-emergence runs (cognitive load of trait-matching).
 
-## Project layout
+## Documentation
+
+- `docs/ARCHITECTURE.md` — sim ↔ Python ↔ PPO data flow, full obs layout,
+  action space, reward breakdown, policy network design.
+- `docs/EXPERIMENTS.md` — honest results per curriculum (L2 trait emergence at
+  ~8–10% real collection; L3 gate-opening not yet emerged), what was tried and
+  why it didn't help, known gaps, and metric discipline.
+- In-code docstrings in `src/model.py`, `src/env.py`, `src/ppo.py` explain the
+  architecture and the stability fixes (RewardNormalizer, entropy floor).
+
+> The two root-level `design.md` and `EMERGENCEGRID_DUMP.md` are **earlier draft /
+> postmortem notes** from the project's original "emergent cooperation" direction
+> (2026-08-14) and predate the trait-emergence results. They are kept for history
+> but `docs/` is the current, accurate writeup.
 
 ```
 cpp/sim.cpp            C++ gridworld simulator (pybind11 module cpp_sim)

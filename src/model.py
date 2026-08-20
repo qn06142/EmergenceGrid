@@ -21,6 +21,34 @@ def _orth(w: torch.Tensor, gain: float = 1.0) -> None:
 
 
 class AgentPolicyBatch(nn.Module):
+    """Policy network for N independent agents, trained with shared weights.
+
+    Architecture (three stages):
+      1. Vision backbone — a *no-pool dilated CNN* (MiniGrid-style) over the
+         11x11 local patch (SPAT_C=12 channels: walls, food types, gates, agents...).
+         Stride-1 with pad=dilation preserves spatial resolution so fine structures
+         (gates, single walls) stay crisp. 4 layers with dilations 1/2/4/8 give an
+         ~31-tile receptive field — the agent can see food across most of the map,
+         unlike the earlier 1024-token ViT whose local attention spanned only ~8 tiles
+         (that ViT was "wall-blind" and got 72% of moves blocked on curriculum 1).
+      2. Spatial pool — the CNN feature map is pooled to an 8x8 coarse grid
+         (SPATIAL_POOL=8) instead of a single global average. The 8x8 keeps *where*
+         things are (a global average erased wall position and made navigation fail).
+      3. Recurrent core — a GRU over the pooled features + the agent's own-state
+         vector (traits, energy, inventory, food-direction), producing a hidden state
+         that carries memory across the episode. A 2-layer reasoning-head MLP is
+         applied to the GRU output before the action/value heads, adding capacity for
+         the cognitive load of trait-matching (which trait do I need? do I have it?).
+
+    A directional prior (`food_w`) is added to the action logits: it nudges the
+    agent toward the food-direction vector in its observation (UP if food is north,
+    etc.) and adds a small harvest bias when food is adjacent. This is a *prior*, not
+    a reward — it speeds learning but the policy can override it (e.g. to mutate
+    instead of harvest when it lacks the trait for gated food).
+
+    forward_agent(i, ob, hid) runs a single agent (used for probing/rendering);
+    forward(obs_b, hid_b) runs the full batch (used in training).
+    """
     def __init__(
         self,
         N: int,

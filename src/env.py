@@ -1,6 +1,35 @@
 """
 Python wrapper around the C++ sim (cpp_sim.Sim).
-Observation shape: (N, 49166) float32.
+
+Observation layout (per agent), total OBS_DIM = 49166 for a 64x64 grid:
+  - Global patch: GRID_H*GRID_W*SPAT_C = 64*64*12 = 49152 floats. A full-map
+    one-hot-ish encoding of the world (tile type per cell x 12 channels), so the
+    agent sees walls/food/gates/agents everywhere. (Used by the ViT path; the CNN
+    path additionally takes an 11x11 local patch — see model.py.)
+  - Own-state vector: 14 traits + 11x11 patch(121*12) + (food_dx, food_dy, food_dist)
+    = 14 + 1452 + 3 = 1469 floats describing the agent itself and its relation to
+    the nearest food (direction unit-vector + normalized distance). The food-direction
+    signal is what lets the policy navigate to food (including gated food — the C++
+    food index includes HARD_NUT/TALL_FRUIT).
+
+Action space (13 discrete actions): see ACTION_MAP in the sim. 0 idle, 1-4 move
+(UP/RIGHT/DOWN/LEFT), 5 harvest, 6 share, 7 signal, 8-12 mutate traits
+(str+-/reach+-/speed+). Gated food requires a trait: HARD_NUT -> strength>=0.6,
+TALL_FRUIT -> reach>=0.6.
+
+Reward (computed in C++, see sim.cpp constants):
+  - PBRS navigation bonus (potential-based, annealed by curriculum) rewarding steps
+    that decrease distance to nearest food (NOT camping — skipped when adjacent).
+  - FOOD_PULL potential on the step food gets closer (was a state reward; changed to
+    potential so the agent must EAT rather than orbit food for the pull).
+  - harvest: +EAT_GAIN (15) when adjacent to harvestable food, -INVALID_HARVEST_PEN
+    (0.5) otherwise (kills free harvest-spam).
+  - mutate: -TRAIT_MUT_PEN (1.0) per mutate, but +1.0 when it *gains* a trait it
+    lacked (can_hard/can_tall) — net ~0 unless the mutation unlocks gated food.
+  - gate: +GATE_GAIN (0.8) to agents who open a gate (cumulative strength >= threshold).
+  - death: -DEATH_PEN (2.0) when energy hits 0.
+
+env.step(actions) returns (obs, rewards, dones, info). obs is (N, OBS_DIM) float32.
 """
 import os
 import sys
