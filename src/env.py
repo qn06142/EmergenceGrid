@@ -1,7 +1,7 @@
 """
 Python wrapper around the C++ sim (cpp_sim.Sim).
 
-Observation layout (per agent), total OBS_DIM = 49166 for a 64x64 grid:
+Observation layout (per agent), total OBS_DIM = 50621 for a 64x64 grid:
   - Global patch: GRID_H*GRID_W*SPAT_C = 64*64*12 = 49152 floats. A full-map
     one-hot-ish encoding of the world (tile type per cell x 12 channels), so the
     agent sees walls/food/gates/agents everywhere. (Used by the ViT path; the CNN
@@ -10,7 +10,7 @@ Observation layout (per agent), total OBS_DIM = 49166 for a 64x64 grid:
     = 14 + 1452 + 3 = 1469 floats describing the agent itself and its relation to
     the nearest food (direction unit-vector + normalized distance). The food-direction
     signal is what lets the policy navigate to food (including gated food — the C++
-    food index includes HARD_NUT/TALL_FRUIT).
+    food index includes HARD_NUT/TALL_FRUIT).  (49152 + 1469 = 50621 total.)
 
 Action space (13 discrete actions): see ACTION_MAP in the sim. 0 idle, 1-4 move
 (UP/RIGHT/DOWN/LEFT), 5 harvest, 6 share, 7 signal, 8-12 mutate traits

@@ -33,7 +33,7 @@ until recompiled.
 
 ## 3. Observation (`OBS_DIM`, per agent)
 
-For a 64×64 grid, `OBS_DIM = 49166`:
+For a 64×64 grid, `OBS_DIM = 50621`:
 
 | block | size | contents |
 |-------|------|----------|
