@@ -1,0 +1,25 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.env
+
+# Build artifacts (rebuild with `python build_cpp.py`)
+*.pyd
+*.obj
+*.exp
+*.lib
+cpp_sim.pyd
+src/cpp_sim.pyd
+
+# Experiment logs
+train_*.log
+*.log
+
+# Checkpoints (large; regenerate by training)
+ckpts/
+
+# OS / editor junk
+nul
+Thumbs.db
+.DS_Store
