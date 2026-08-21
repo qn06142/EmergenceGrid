@@ -96,7 +96,36 @@ struct Sim {
     std::vector<std::vector<int>> bucket; // B*B -> list of food indices
     std::vector<int> occ;         // occupancy grid (agent index+1, 0 empty)
     int step_count=0;
-    float nav_alpha=0.25f;         // PBRS navigation coefficient (annealed by curriculum)
+    // ---- dynamic reward parameters (settable at runtime; annealed by training progress) ----
+    struct RewardParams {
+        float food_pull = 1.0f;       // potential pull toward food
+        float nav_alpha = 0.15f;      // PBRS navigation coefficient
+        float eat_gain = 15.0f;       // reward for eating food
+        float invalid_harvest_pen = 0.5f; // penalty for harvesting with no food adjacent
+        float trait_mut_pen = 1.0f;   // penalty per mutate
+        float gate_gain = 0.8f;       // reward for opening a gate
+        float trait_match_bonus = 0.0f; // shaping bonus for adjacent eatable gated food
+    };
+    RewardParams rp;
+    float step_frac = 0.0f;  // training progress in [0,1], set by Python each update
+
+    // ---- closed-loop adaptation diagnostics ----
+    // Accumulated over the episode (reset each reset()). Python reads these after
+    // a rollout and adjusts rp.* to REACT to the agent's actual failure mode
+    // (not on a blind time schedule).
+    struct Diag {
+        long steps = 0;          // agent-steps observed
+        long harvest_invalid = 0;// act==5 while NOT adjacent to harvestable food
+        long harvest_valid = 0;  // act==5 while adjacent (real eats + adjacent presses)
+        long move_away = 0;      // a move action that INCREASED distance to nearest food
+        long move_closer = 0;    // a move action that DECREASED distance
+        long mutate_steps = 0;   // act in 8..12
+        long gate_adj = 0;       // steps adjacent to a GATE
+        long gate_adj_strong = 0;// steps adjacent to a GATE with enough strength to open
+        long dead = 0;           // agent died this episode
+    };
+    Diag diag;
+    void reset_diag() { diag = Diag(); }
 
     Sim(int width, int height, int n, uint32_t sd, int curric, bool resp,
         int food_seed=0, int food_seed_dist=1, int food_density_div=50)
@@ -119,10 +148,17 @@ struct Sim {
         // (curriculum 5 was wrongly zeroed -> no nav signal -> agent camps/spams).
         // Disable the PBRS bonus only when already adjacent to food (prev_dist<=1)
         // so camping on food isn't rewarded; the move-toward signal stays alive.
-        if      (curric >= 3) nav_alpha = 0.10f;
-        else if (curric >= 1) nav_alpha = 0.15f;
-        else                  nav_alpha = 0.25f;
+        // Curriculum baseline for PBRS navigation coefficient (Ng et al. shaping).
+        // This is the DEFAULT; Python may override rp.* each update to anneal rewards.
+        if      (curric >= 3) rp.nav_alpha = 0.10f;
+        else if (curric >= 1) rp.nav_alpha = 0.15f;
+        else                  rp.nav_alpha = 0.25f;
     }
+
+    // Set reward parameters from Python (called each training update to anneal).
+    void set_reward_params(const RewardParams &p) { rp = p; }
+    // Set training progress fraction [0,1] (for any progress-dependent shaping).
+    void set_step_frac(float f) { step_frac = f; }
 
     inline int idx(int x,int y) const { return y*W+x; }
     inline int bidx(int x,int y) const { return (y*B/W)*B + (x*B/W); }
@@ -301,18 +337,18 @@ struct Sim {
             if (t==FOOD||t==OASIS){
                 grid[idx(nx,ny)]=EMPTY; foods.push_back({nx,ny}); bucket[bidx(nx,ny)].push_back((int)foods.size()-1);
                 if (food_regen) { regen_t[idx(nx,ny)]=(t==FOOD)?FOOD_REGEN:OASIS_REGEN; regen_type[idx(nx,ny)]=t; }
-                float gain=EAT_GAIN*(t==OASIS?OASIS_BONUS:1.0f);
+                float gain=rp.eat_gain*(t==OASIS?OASIS_BONUS:1.0f);
                 a.energy=std::min(E_MAX_F,a.energy+gain); a.inv++; return gain;
             }
             if (t==HARD_NUT && a.tr.can_hard()){
                 grid[idx(nx,ny)]=EMPTY; foods.push_back({nx,ny}); bucket[bidx(nx,ny)].push_back((int)foods.size()-1);
                 if (food_regen) { regen_t[idx(nx,ny)]=FOOD_REGEN; regen_type[idx(nx,ny)]=FOOD; }
-                float gain=EAT_GAIN*(1.0f+HARD_BONUS); a.energy=std::min(E_MAX_F,a.energy+gain); a.inv++; return gain;
+                float gain=rp.eat_gain*(1.0f+HARD_BONUS); a.energy=std::min(E_MAX_F,a.energy+gain); a.inv++; return gain;
             }
             if (t==TALL_FRUIT && a.tr.can_tall()){
                 grid[idx(nx,ny)]=EMPTY; foods.push_back({nx,ny}); bucket[bidx(nx,ny)].push_back((int)foods.size()-1);
                 if (food_regen) { regen_t[idx(nx,ny)]=FOOD_REGEN; regen_type[idx(nx,ny)]=FOOD; }
-                float gain=EAT_GAIN*(1.0f+TALL_BONUS); a.energy=std::min(E_MAX_F,a.energy+gain); a.inv++; return gain;
+                float gain=rp.eat_gain*(1.0f+TALL_BONUS); a.energy=std::min(E_MAX_F,a.energy+gain); a.inv++; return gain;
             }
         }
         return 0.0f;
@@ -356,7 +392,7 @@ struct Sim {
         else if (act==11) t.reach=std::max(0.05f,t.reach-TRAIT_MUT);
         else if (act==12) t.speed=std::min(1.0f,t.speed+TRAIT_MUT);
         if (t.strength+t.speed>1.3f){ float s=1.3f/(t.strength+t.speed); t.strength*=s; t.speed*=s; }
-        a.energy=std::max(0.0f,a.energy-TRAIT_MUT_PEN); rew[a.idx]-=TRAIT_MUT_PEN;
+        a.energy=std::max(0.0f,a.energy-rp.trait_mut_pen); rew[a.idx]-=rp.trait_mut_pen;
         if (!bhard && t.can_hard()) rew[a.idx]+=1.0f;   // gaining the trait is immediately rewarding
         if (!btall && t.can_tall()) rew[a.idx]+=1.0f;   // (mutate penalty is 1.0, so net ~0 unless it unlocks food)
         a.cooldown=TRAIT_COOLDOWN;
@@ -387,7 +423,7 @@ struct Sim {
             for (auto &g:gate_cells){ if (abs(a.x-g[0])+abs(a.y-g[1])==1){ s+=a.tr.strength; pushers.push_back(a.idx); break; } } }
         if (s>=TH_GATE/100.0f){
             for (auto &g:gate_cells){ if (grid[idx(g[0],g[1])]==GATE) grid[idx(g[0],g[1])]=EMPTY; }
-            for (int ai:pushers){ agents[ai].energy=std::min(E_MAX_F,agents[ai].energy+GATE_GAIN); rew[ai]+=GATE_GAIN; }
+            for (int ai:pushers){ agents[ai].energy=std::min(E_MAX_F,agents[ai].energy+rp.gate_gain); rew[ai]+=rp.gate_gain; }
         }
     }
     void regen_tiles() {
@@ -508,13 +544,13 @@ struct Sim {
             // Skip the nav bonus once already adjacent (dist<=1): camping on food
             // shouldn't be rewarded, only the move-toward-food signal matters.
             if (dist_before > 1)
-                r += nav_alpha * (float)(dist_before - dist_after);
+                r += rp.nav_alpha * (float)(dist_before - dist_after);
             // FOOD_PULL as a POTENTIAL (not a state reward): only pay on the step
             // the agent moves CLOSER to food, zero when stationary/adjacent. This
             // stops the agent from "orbiting" food to farm the pull -- eating
-            // (+15, once) now strictly dominates camping (which yields nothing).
+            // (+eat_gain, once) now strictly dominates camping (which yields nothing).
             if (dist_before > 1 && dist_after < dist_before)
-                r += FOOD_PULL * (float)(dist_before - dist_after) / (1.0f + (float)dist_after);
+                r += rp.food_pull * (float)(dist_before - dist_after) / (1.0f + (float)dist_after);
             // Trait-match shaping: reward being adjacent to a GATED tile the agent
             // can NOW eat (has can_hard/can_tall). This bridges the 3-step credit
             // gap in the mutate->eat loop: "I gained the trait AND I'm next to the
@@ -526,19 +562,30 @@ struct Sim {
                 for (int dx=-1;dx<=1;dx++) for (int dy=-1;dy<=1;dy++){
                     int nx=a.x+dx, ny=a.y+dy; if (nx<0||ny<0||nx>=W||ny>=H) continue;
                     int t=grid[idx(nx,ny)];
-                    if (t==HARD_NUT && a.tr.can_hard()) { r += TRAIT_MATCH_BONUS; break; }
-                    if (t==TALL_FRUIT && a.tr.can_tall()) { r += TRAIT_MATCH_BONUS; break; }
+                    if (t==HARD_NUT && a.tr.can_hard()) { r += rp.trait_match_bonus; break; }
+                    if (t==TALL_FRUIT && a.tr.can_tall()) { r += rp.trait_match_bonus; break; }
                 }
             }
             bool adj = adjacent_harvestable(a);
             if (act == 5) {
-                if (adj) r += harvest(a);
-                else     r -= INVALID_HARVEST_PEN;
+                if (adj) { r += harvest(a); diag.harvest_valid++; }
+                else     { r -= rp.invalid_harvest_pen; diag.harvest_invalid++; }
             } else if (act == 6) { share(a, rew); r -= ACT_COST_SHARE; }
             else if (act == 7) { signal(a, rew); r -= ACT_COST_SIGNAL; }
-            else if (act >= 8 && act <= 12) { mutate(a, act, rew); r -= ACT_COST_MUT; }
+            else if (act >= 8 && act <= 12) { mutate(a, act, rew); r -= ACT_COST_MUT; diag.mutate_steps++; }
+            // ---- closed-loop diagnostics ----
+            diag.steps++;
+            if (act >= 1 && act <= 4) {  // a move action
+                if (dist_after > dist_before) diag.move_away++;
+                else if (dist_after < dist_before) diag.move_closer++;
+            }
+            // gate proximity (for gate-opening credit bridging on L3)
+            for (int dx=-1;dx<=1;dx++) for (int dy=-1;dy<=1;dy++){
+                int nx=a.x+dx, ny=a.y+dy; if (nx<0||ny<0||nx>=W||ny>=H) continue;
+                if (grid[idx(nx,ny)]==GATE) { diag.gate_adj++; if (a.tr.strength>=TH_GATE/100.0f) diag.gate_adj_strong++; break; }
+            }
             // 5. death evaluation
-            if (a.energy <= 0) { a.energy = 0; a.alive = false; done[a.idx] = true; r -= DEATH_PEN; occ[idx(a.x, a.y)] = 0; }
+            if (a.energy <= 0) { a.energy = 0; a.alive = false; done[a.idx] = true; r -= DEATH_PEN; occ[idx(a.x, a.y)] = 0; diag.dead++; }
             rew[a.idx] = r;
         }
         resolve_hazards(rew,done);
@@ -595,6 +642,7 @@ struct Sim {
 
     py::array_t<float> reset() {
         step_count=0;
+        reset_diag();   // clear closed-loop diagnostics each episode
         std::fill(regen_t.begin(),regen_t.end(),0);
         std::fill(regen_type.begin(),regen_type.end(),0);
         std::fill(occ.begin(),occ.end(),0);
@@ -682,6 +730,24 @@ PYBIND11_MODULE(cpp_sim, m) {
         .def("set_food_regen", [](Sim&s,bool v){ s.food_regen=v; })
         .def("set_food_regen_mode", [](Sim&s,int v){ s.food_regen_mode=v; if (v==0) s.food_regen=false; else s.food_regen=true; })
         .def("set_gated_food", [](Sim&s,int v){ s.gated_food=v; })
+        .def("set_reward_params", [](Sim&s, float food_pull, float nav_alpha, float eat_gain,
+                                      float invalid_harvest_pen, float trait_mut_pen,
+                                      float gate_gain, float trait_match_bonus){
+            s.rp.food_pull = food_pull;
+            s.rp.nav_alpha = nav_alpha;
+            s.rp.eat_gain = eat_gain;
+            s.rp.invalid_harvest_pen = invalid_harvest_pen;
+            s.rp.trait_mut_pen = trait_mut_pen;
+            s.rp.gate_gain = gate_gain;
+            s.rp.trait_match_bonus = trait_match_bonus;
+        })
+        .def("set_step_frac", [](Sim&s,float f){ s.step_frac = f; })
+        .def("get_diag", [](Sim&s){
+            const auto &d = s.diag;
+            return py::make_tuple(d.steps, d.harvest_invalid, d.harvest_valid,
+                                  d.move_away, d.move_closer, d.mutate_steps,
+                                  d.gate_adj, d.gate_adj_strong, d.dead);
+        })
         .def("set_tile", [](Sim&s,int x,int y,int t){ if (x>=0&&y>=0&&x<s.W&&y<s.H) s.grid[s.idx(x,y)]=t; })
         .def("get_tile", [](Sim&s,int x,int y){ return (x>=0&&y>=0&&x<s.W&&y<s.H)? s.grid[s.idx(x,y)] : -1; })
         .def("clear_food", [](Sim&s){ for (auto &v:s.grid) if (v==1) v=0; })

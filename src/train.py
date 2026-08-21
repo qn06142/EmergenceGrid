@@ -45,12 +45,83 @@ def make_hid_stack_batched(hiddens, K, H, device):
     return torch.cat(parts, dim=1)
 
 
+def reward_schedule(p, mode='none'):
+    """Return annealed reward params for training progress p in [0,1].
+
+    The hypothesis under test (user): static reward constants are the crux of the
+    ~9.7% ceiling -- a fixed reward can't both DISCOVER a behavior early (needs
+    forgiving, exploration-friendly signal) and SHARPEN it late (needs tight
+    signal). So we anneal:
+      - food_pull / nav_alpha: HIGH early (discover food-finding), decay late.
+      - invalid_harvest_pen:   LOW early (don't punish fumbling), rise late.
+      - eat_gain:              constant (the core collection reward).
+      - trait_mut_pen:         constant (mutate cost).
+    'none'   -> static defaults (control / A-B baseline).
+    'linear' -> linear anneal from early->late over p in [0,1].
+    """
+    rp = dict(food_pull=1.0, nav_alpha=0.15, eat_gain=15.0,
+              invalid_harvest_pen=0.5, trait_mut_pen=1.0,
+              gate_gain=0.8, trait_match_bonus=0.0)
+    if mode == 'none' or p is None:
+        return rp
+    p = max(0.0, min(1.0, p))
+    if mode == 'linear':
+        rp['food_pull'] = 2.0 - 1.0 * p          # 2.0 -> 1.0
+        rp['nav_alpha'] = 0.30 - 0.15 * p         # 0.30 -> 0.15
+        rp['invalid_harvest_pen'] = 0.1 + 0.4 * p  # 0.1 -> 0.5
+    return rp
+
+
+def clamp(x, lo, hi):
+    return max(lo, min(hi, x))
+
+
+def adaptive_reward_params(diag_agg, rp, k=8, step=0.15):
+    """CLOSED-LOOP reward adaptation: react to the agent's ACTUAL failure mode
+    (measured from sim diagnostics this episode), not a blind time schedule.
+
+    diag_agg = sum of per-env (steps, harvest_invalid, harvest_valid, move_away,
+    move_closer, mutate_steps, gate_adj, gate_adj_strong, dead) across all K envs.
+
+    Failure-mode -> lever mapping (each nudged by `step`, then clamped):
+      1. harvest-spam (invalid/(invalid+valid) high)  -> RAISE invalid_harvest_pen
+      2. moves-away (move_away > move_closer)          -> RAISE food_pull + nav_alpha
+      3. mutate-but-no-eat (mutate_steps high, valid low) -> LOWER trait_mut_pen
+      4. gate-adjacent-but-weak (gate_adj high)       -> RAISE trait_match_bonus
+         (shaping for being next to gated things; bridges L3 credit cliff)
+      5. dying (dead>0)                                -> RAISE eat_gain slightly
+    """
+    steps, hi, hv, maway, mclose, mut, gadj, gstr, dead = diag_agg
+    steps = max(1, steps)
+    invalid_rate = hi / (hi + hv + 1)
+    # 1. harvest-spam -> penalize invalid harvest harder
+    if invalid_rate > 0.15:
+        rp['invalid_harvest_pen'] = clamp(rp['invalid_harvest_pen'] + step, 0.1, 3.0)
+    elif invalid_rate < 0.03:
+        rp['invalid_harvest_pen'] = clamp(rp['invalid_harvest_pen'] - step * 0.5, 0.1, 3.0)
+    # 2. moving away from food more than toward -> boost navigation signal
+    if maway > mclose:
+        rp['food_pull'] = clamp(rp['food_pull'] + step * 0.5, 0.2, 3.0)
+        rp['nav_alpha'] = clamp(rp['nav_alpha'] + step * 0.1, 0.02, 0.5)
+    # 3. mutating a lot but not eating gated food -> make mutating cheaper
+    if mut > 0.2 * steps and hv < 0.1 * steps:
+        rp['trait_mut_pen'] = clamp(rp['trait_mut_pen'] - step * 0.3, 0.1, 2.0)
+    # 4. hanging near gates but never opening -> shape gate adjacency
+    if gadj > 0.1 * steps:
+        rp['trait_match_bonus'] = clamp(rp['trait_match_bonus'] + step * 0.2, 0.0, 1.0)
+    # 5. agents dying -> eating more valuable
+    if dead > 0:
+        rp['eat_gain'] = clamp(rp['eat_gain'] + step * 2.0, 5.0, 30.0)
+    return rp
+
+
 def run(n=16, grid=128, k=8, nstep=64, nupd=2000, seed=12345, log_every=50,
         lr=2.5e-4, clip=0.2, ent_coef=0.05, vf_coef=0.5, n_epochs=4,
         minibatch=64, ckpt_dir=None, exp_name='eg16', save_every=200,
         resume=False, respawn=False, curriculum=5, food_seed=0, food_seed_dist=1,
         food_density_div=50, init_ckpt=None, food_regen_mode=2, freeze_vision=False,
-        gated_food=1, d_model=256, gru_hidden=256, head_dim=256, ent_floor=0.5):
+        gated_food=1, d_model=256, gru_hidden=256, head_dim=256, ent_floor=0.5,
+        reward_schedule_mode='none', adaptive=False):
     torch.manual_seed(seed)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     ckpt_dir = fixpath(ckpt_dir)
@@ -112,6 +183,10 @@ def run(n=16, grid=128, k=8, nstep=64, nupd=2000, seed=12345, log_every=50,
     hid_batched = torch.zeros(n, k, H, device=device)
     obs_now = [envs[e].reset() for e in range(k)]
     ep_rew = [[0.0] * n for _ in range(k)]
+    # closed-loop adaptive reward state (persisted across updates)
+    rp_state = dict(food_pull=1.0, nav_alpha=0.15, eat_gain=15.0,
+                    invalid_harvest_pen=0.5, trait_mut_pen=1.0,
+                    gate_gain=0.8, trait_match_bonus=0.0)
     t0 = time.time()
 
     for upd in range(start_upd, nupd):
@@ -120,6 +195,16 @@ def run(n=16, grid=128, k=8, nstep=64, nupd=2000, seed=12345, log_every=50,
         # no pocket-feeding). Without this, no-regen training depletes food on the
         # first rollout and trains on empty maps forever.
         obs_now = [envs[e].reset() for e in range(k)]
+        # Apply reward parameters for this training step.
+        # Priority: closed-loop adaptive > schedule > static defaults.
+        if adaptive:
+            sched = dict(rp_state)          # carried over from last iteration's adaptation
+        else:
+            p = upd / max(1, nupd - 1)
+            sched = reward_schedule(p, reward_schedule_mode)
+        for e in range(k):
+            envs[e].set_step_frac(upd / max(1, nupd - 1))
+            envs[e].set_reward_params(**sched)
         hid_batched = torch.zeros(n, k, H, device=device)
         for b in bufs:
             b.reset()
@@ -187,6 +272,21 @@ def run(n=16, grid=128, k=8, nstep=64, nupd=2000, seed=12345, log_every=50,
                 bufs[i].hid.append(hid_batched[i:i + 1, :, :].detach())   # (1,K,H)
             hid_batched = h_new_m
             obs_now = next_obs
+
+        # ---- CLOSED-LOOP adaptation: read this update's diagnostics, react ----
+        if adaptive:
+            agg = [0] * 9
+            for e in range(k):
+                d = envs[e].get_diag()
+                for j in range(9):
+                    agg[j] += int(d[j])
+            rp_state = adaptive_reward_params(tuple(agg), rp_state, k=k)
+            if log_every and upd % log_every == 0:
+                print(f"  [adapt] ihp={rp_state['invalid_harvest_pen']:.2f} "
+                      f"fp={rp_state['food_pull']:.2f} nav={rp_state['nav_alpha']:.2f} "
+                      f"tmp={rp_state['trait_mut_pen']:.2f} eg={rp_state['eat_gain']:.1f} "
+                      f"tmb={rp_state['trait_match_bonus']:.2f} | diag hi={agg[1]} hv={agg[2]} "
+                      f"away={agg[3]} close={agg[4]} mut={agg[5]} dead={agg[8]}", flush=True)
 
         # action histogram for agent 0 (before updates)
         import collections as _col
@@ -364,6 +464,15 @@ if __name__ == '__main__':
                    help='minimum entropy floor for the policy (prevents single-action '
                         'collapse / constant-output attractors). 0.5 is a sane default '
                         'for solo navigation.')
+    ap.add_argument('--reward_schedule', type=str, default='none',
+                   choices=['none', 'linear'],
+                   help='anneal reward params over training (dynamic rewards). '
+                        'none=static (control); linear=high pull/low pen early -> '
+                        'low pull/high pen late. Tests whether static rewards cap learning.')
+    ap.add_argument('--adaptive', action='store_true',
+                   help='CLOSED-LOOP reward adaptation: after each update, read sim '
+                        'diagnostics (harvest-spam, move-away, mutate-no-eat, gate-adj, '
+                        'death) and REACT by adjusting reward params. Overrides --reward_schedule.')
     args = ap.parse_args()
     run(n=args.n, grid=args.grid, k=args.k, nstep=args.nstep, nupd=args.nupd,
         seed=args.seed, log_every=args.log_every, ckpt_dir=args.ckpt_dir,
@@ -374,4 +483,5 @@ if __name__ == '__main__':
         food_regen_mode=args.food_regen_mode, freeze_vision=args.freeze_vision,
         gated_food=args.gated_food,
         d_model=args.d_model, gru_hidden=args.gru_hidden, head_dim=args.head_dim,
-        ent_floor=args.ent_floor)
+        ent_floor=args.ent_floor, reward_schedule_mode=args.reward_schedule,
+        adaptive=args.adaptive)

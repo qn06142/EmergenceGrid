@@ -117,6 +117,14 @@ class EmergenceGrid:
         self._sim = cpp_sim.Sim(width, height, n_agents, seed, curriculum, respawn, food_seed, food_seed_dist, food_density_div)
         self._sim.set_food_regen_mode(food_regen_mode)
         self._sim.set_gated_food(gated_food)
+        # Default reward params (mirror sim.cpp RewardParams defaults). Override per
+        # update via set_reward_params() to anneal during training.
+        self.reward_params = dict(
+            food_pull=1.0, nav_alpha=0.15, eat_gain=15.0,
+            invalid_harvest_pen=0.5, trait_mut_pen=1.0,
+            gate_gain=0.8, trait_match_bonus=0.0)
+        self._apply_reward_params()
+
         self.W = width
         self.H = height
         self.n_agents = n_agents
@@ -137,8 +145,32 @@ class EmergenceGrid:
 
         self._refresh()
 
+    def _apply_reward_params(self):
+        rp = self.reward_params
+        self._sim.set_reward_params(
+            rp['food_pull'], rp['nav_alpha'], rp['eat_gain'],
+            rp['invalid_harvest_pen'], rp['trait_mut_pen'],
+            rp['gate_gain'], rp['trait_match_bonus'])
+        self._sim.set_step_frac(getattr(self, 'step_frac', 0.0))
+
+    def set_reward_params(self, **kw):
+        """Override reward parameters (e.g. to anneal over training).
+        Supported keys: food_pull, nav_alpha, eat_gain, invalid_harvest_pen,
+        trait_mut_pen, gate_gain, trait_match_bonus."""
+        self.reward_params.update(kw)
+        self._apply_reward_params()
+
+    def get_diag(self):
+        """Return the C++ sim's closed-loop diagnostics tuple:
+        (steps, harvest_invalid, harvest_valid, move_away, move_closer,
+         mutate_steps, gate_adj, gate_adj_strong, dead)."""
+        return self._sim.get_diag()
+
+    def set_step_frac(self, f: float):
+        self.step_frac = float(f)
+        self._sim.set_step_frac(float(f))
+
     def adjacent_harvestable(self, a: Agent) -> bool:
-        """Check if an agent is adjacent to harvestable food."""
         return self._sim.adjacent_harvestable(self._sim.agents[a.idx])
 
     def _refresh(self) -> None:

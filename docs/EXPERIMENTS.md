@@ -83,3 +83,50 @@ Promising next steps (untested):
   mash, which can be 100% while eating 0 food).
 - `dist` in logs is `obs[-1]*40` (normalized); 2.0 = far, 0.5 = on food.
 - Entropy (`ent`) must stay >~0.5; collapse to ~0 means single-action lock-up.
+
+## Closed-loop adaptive rewards (experiment, 2026-08-21)
+
+Hypothesis: static reward constants cap learning; instead, *react* to the
+agent's actual failure mode each episode (closed-loop), not a blind time
+schedule. Implemented in `cpp/sim.cpp` (9-counter `Diag` accumulator) +
+`src/train.py` (`adaptive_reward_params()`, `--adaptive` flag) +
+`src/eval_metrics.py` (rigorous multi-seed harness).
+
+Failure-mode -> reward lever map (each nudged + clamped per update):
+  1. harvest-spam (invalid/(invalid+valid) high) -> RAISE invalid_harvest_pen
+  2. moves-away (move_away > move_closer)        -> RAISE food_pull + nav_alpha
+  3. mutate-but-no-eat (mutate high, valid low)  -> LOWER trait_mut_pen
+  4. gate-adjacent-but-weak (gate_adj high)      -> RAISE trait_match_bonus
+  5. dying (dead>0)                               -> RAISE eat_gain
+
+Results (multi-seed harness, mean +/- std over 5 seeds x 400 steps):
+
+| config | curriculum | collect_rate | invalid_harvest_rate | mutate->eat |
+|--------|-----------|--------------|---------------------|-------------|
+| static | 1 | 0.045 +/- 0.030 | 0.871 +/- 0.072 | 0.297 +/- 0.167 |
+| schedule(linear) | 1 | 0.071 +/- 0.018 | 0.796 +/- 0.047 | 0.797 +/- 0.275 |
+| adaptive | 1 | 0.064 +/- 0.029 | 0.546 +/- 0.194 | 1.165 +/- 0.598 |
+| static | 2 | 0.076 +/- 0.055 | 0.685 +/- 0.209 | 0.825 +/- 0.511 |
+| adaptive | 2 | 0.071 +/- 0.034 | 0.421 +/- 0.243 | 0.740 +/- 0.327 |
+| adaptive | 3 | 0.076 +/- 0.031 | 0.715 +/- 0.112 | 0.719 +/- 0.339 |
+
+Honest conclusions:
+- The controller **mechanically works**: on L1 it cut invalid-harvest rate
+  0.87 -> 0.55 and on L2 0.69 -> 0.42 (lever #1 fired correctly), and it was
+  more *consistent* (lower std) than static.
+- But it did **NOT break the collection ceiling** — collect_rate is flat vs
+  static within noise on both L1 and L2. So dynamic/adaptive rewards are not
+  the crux of the ~10% ceiling.
+- The harness itself **exposed the prior metric flaw**: std is +/- 0.03-0.05,
+  so the earlier "0.112 vs 0.107 vs 0.099" single-seed comparisons were
+  NOISE, not signal. This validates the "our metrics were flawed" concern.
+
+## L3 gate-opening is a HORIZON artifact (not a reward problem)
+
+`gateopen=0` on L3 is NOT a learning failure. Opening a gate needs cumulative
+strength >= 1.10; starting at 0.35 + 0.12/mutate with a 15-step trait cooldown
+requires ~7 mutations x 15 = **~105 steps**, but `nstep=64`. So gate-opening
+is structurally impossible within an episode. The harness reports
+`gate_reachable_seeds = 0/5` (agent never gets adjacent-with-strength),
+confirming the gate lever (#4) never even had a chance to fire. Fixing L3
+means raising `nstep` (or lowering `TH_GATE` / cooldown), NOT reshaping rewards.
