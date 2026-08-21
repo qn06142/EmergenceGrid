@@ -69,6 +69,7 @@ struct Agent {
     bool alive;
     int last_action;
     int cooldown;
+    int last_gated_dist = 1e9;   // for instrumentation: gated-food dist last step
 };
 
 struct Sim {
@@ -112,7 +113,10 @@ struct Sim {
     // ---- closed-loop adaptation diagnostics ----
     // Accumulated over the episode (reset each reset()). Python reads these after
     // a rollout and adjusts rp.* to REACT to the agent's actual failure mode
-    // (not on a blind time schedule).
+    // (not on a blind time schedule). The 9 base fields feed the adaptive
+    // controller via get_diag(); get_diag_full() returns the COMPLETE instrument
+    // set for offline analysis (pipeline funnel, trait dynamics, distances, gate
+    // progress, reward probe) so we stop hypothesizing blind.
     struct Diag {
         long steps = 0;          // agent-steps observed
         long harvest_invalid = 0;// act==5 while NOT adjacent to harvestable food
@@ -123,6 +127,31 @@ struct Sim {
         long gate_adj = 0;       // steps adjacent to a GATE
         long gate_adj_strong = 0;// steps adjacent to a GATE with enough strength to open
         long dead = 0;           // agent died this episode
+        // ---- full instrumentation ----
+        // 3-step pipeline funnel (gated food = HARD_NUT/TALL_FRUIT)
+        long reached_gated = 0;      // steps adjacent to any gated tile
+        long mutated_near_gated = 0; // mutate act while adjacent to gated
+        long gained_right_trait = 0; // gained a trait that unlocks adjacent gated
+        long harvested_gated = 0;    // ate gated food (inv++ on gated)
+        long wrong_trait_mut = 0;    // mutated while adjacent to gated but it didn't unlock
+        // trait dynamics
+        long trait_gain_events = 0;  // a mutation that granted can_hard/can_tall
+        long trait_loss_events = 0;  // a mutation that removed can_hard/can_tall
+        double sum_strength = 0.0;   // running sum for mean strength (per agent-step)
+        double sum_reach = 0.0;      // running sum for mean reach
+        long trait_samples = 0;      // number of (agent,step) samples for the means
+        // ground-truth distances (not the obs proxy)
+        double dist_food_sum = 0.0;  // sum of nearest_food_dist per agent-step
+        long dist_food_samples = 0;
+        double dist_gated_sum = 0.0; // sum of nearest gated-food dist per agent-step
+        long dist_gated_samples = 0;
+        long moved_closer_gated = 0; // move action that decreased dist to nearest gated
+        long moved_away_gated = 0;    // move action that increased dist to nearest gated
+        // gate progress (L3)
+        float max_strength = 0.0f;   // max strength any alive agent achieved
+        long gate_chain_possible = 0;// 1 if max_strength >= TH_GATE at some point
+        // reward probe: total reward yielded per action type (13 actions)
+        double rew_by_action[13] = {0.0};
     };
     Diag diag;
     void reset_diag() { diag = Diag(); }
@@ -304,6 +333,20 @@ struct Sim {
         return best;
     }
 
+    // ground-truth nearest GATED-food (HARD_NUT/TALL_FRUIT) Manhattan distance.
+    // Full-grid scan (gated tiles are sparse); used only for instrumentation.
+    int nearest_gated_dist(int x, int y) const {
+        int best = 1e9;
+        for (int yy=0; yy<H; yy++) for (int xx=0; xx<W; xx++) {
+            int t = grid[idx(xx,yy)];
+            if (t==HARD_NUT || t==TALL_FRUIT) {
+                int d = abs(xx-x) + abs(yy-y);
+                if (d < best) best = d;
+            }
+        }
+        return best;
+    }
+
     bool tile_passable(const Agent &a, int t) const {
         if (t==WALL) return false;
         if (t==GAP && !a.tr.can_small()) return false;
@@ -393,8 +436,11 @@ struct Sim {
         else if (act==12) t.speed=std::min(1.0f,t.speed+TRAIT_MUT);
         if (t.strength+t.speed>1.3f){ float s=1.3f/(t.strength+t.speed); t.strength*=s; t.speed*=s; }
         a.energy=std::max(0.0f,a.energy-rp.trait_mut_pen); rew[a.idx]-=rp.trait_mut_pen;
-        if (!bhard && t.can_hard()) rew[a.idx]+=1.0f;   // gaining the trait is immediately rewarding
-        if (!btall && t.can_tall()) rew[a.idx]+=1.0f;   // (mutate penalty is 1.0, so net ~0 unless it unlocks food)
+        // instrumentation: trait-gain / trait-loss events
+        if (!bhard && t.can_hard()) { rew[a.idx]+=1.0f; diag.trait_gain_events++; }   // gaining the trait is immediately rewarding
+        if (!btall && t.can_tall()) { rew[a.idx]+=1.0f; diag.trait_gain_events++; }   // (mutate penalty is 1.0, so net ~0 unless it unlocks food)
+        if (bhard && !t.can_hard()) diag.trait_loss_events++;
+        if (btall && !t.can_tall()) diag.trait_loss_events++;
         a.cooldown=TRAIT_COOLDOWN;
     }
 
@@ -567,21 +613,62 @@ struct Sim {
                 }
             }
             bool adj = adjacent_harvestable(a);
+            // gated-food adjacency (for the pipeline funnel) -- computed once here
+            bool adj_gated = false, adj_gated_unlock = false;
+            for (int dx=-1;dx<=1;dx++) for (int dy=-1;dy<=1;dy++){
+                int nx=a.x+dx, ny=a.y+dy; if (nx<0||ny<0||nx>=W||ny>=H) continue;
+                int t=grid[idx(nx,ny)];
+                if (t==HARD_NUT) { adj_gated=true; if (a.tr.can_hard()) adj_gated_unlock=true; }
+                if (t==TALL_FRUIT) { adj_gated=true; if (a.tr.can_tall()) adj_gated_unlock=true; }
+            }
             if (act == 5) {
-                if (adj) { r += harvest(a); diag.harvest_valid++; }
+                if (adj) { r += harvest(a); diag.harvest_valid++;
+                          if (adj_gated_unlock) diag.harvested_gated++; }
                 else     { r -= rp.invalid_harvest_pen; diag.harvest_invalid++; }
             } else if (act == 6) { share(a, rew); r -= ACT_COST_SHARE; }
             else if (act == 7) { signal(a, rew); r -= ACT_COST_SIGNAL; }
-            else if (act >= 8 && act <= 12) { mutate(a, act, rew); r -= ACT_COST_MUT; diag.mutate_steps++; }
-            // ---- closed-loop diagnostics ----
+            else if (act >= 8 && act <= 12) {
+                mutate(a, act, rew); r -= ACT_COST_MUT; diag.mutate_steps++;
+                if (adj_gated) {
+                    diag.mutated_near_gated++;
+                    if (!adj_gated_unlock) diag.wrong_trait_mut++;
+                    else diag.gained_right_trait++;  // mutated adjacent to gated it can now eat
+                }
+            }
+            // ---- full instrumentation ----
             diag.steps++;
-            if (act >= 1 && act <= 4) {  // a move action
+            // trait dynamics sampling (mean strength/reach over agent-steps)
+            diag.sum_strength += a.tr.strength;
+            diag.sum_reach += a.tr.reach;
+            diag.trait_samples++;
+            if (a.tr.strength > diag.max_strength) diag.max_strength = a.tr.strength;
+            if (a.tr.strength >= TH_GATE/100.0f) diag.gate_chain_possible = 1;
+            // ground-truth distances (not the obs proxy)
+            int gf = nearest_food_dist(a.x, a.y);
+            diag.dist_food_sum += (gf > W+H ? (float)(W+H) : (float)gf);
+            diag.dist_food_samples++;
+            int gg = nearest_gated_dist(a.x, a.y);
+            if (gg < 1e9) { diag.dist_gated_sum += (float)gg; diag.dist_gated_samples++; }
+            // reward probe: attribute this step's reward to the action taken
+            if (act >= 0 && act < 13) diag.rew_by_action[act] += r;
+            // gated adjacency already computed above (adj_gated / adj_gated_unlock)
+            if (adj_gated) diag.reached_gated++;
+            // (mutated_near_gated / wrong_trait_mut / gained_right_trait are counted
+            //  in the act==5..12 branch above to avoid double-counting)
+            // movement vs gated food (direction)
+            if (act >= 1 && act <= 4) {
+                if (gg < a.last_gated_dist) diag.moved_closer_gated++;
+                else if (gg > a.last_gated_dist) diag.moved_away_gated++;
+            }
+            a.last_gated_dist = gg;
+            // move-away/closer vs nearest food (existing)
+            if (act >= 1 && act <= 4) {
                 if (dist_after > dist_before) diag.move_away++;
                 else if (dist_after < dist_before) diag.move_closer++;
             }
-            // gate proximity (for gate-opening credit bridging on L3)
+            // gate proximity
             for (int dx=-1;dx<=1;dx++) for (int dy=-1;dy<=1;dy++){
-                int nx=a.x+dx, ny=a.y+dy; if (nx<0||ny<0||nx>=W||ny>=H) continue;
+                int nx=a.x+dx, ny=a.y+dy; if (nx<0||ny>=W||ny>=H) continue;
                 if (grid[idx(nx,ny)]==GATE) { diag.gate_adj++; if (a.tr.strength>=TH_GATE/100.0f) diag.gate_adj_strong++; break; }
             }
             // 5. death evaluation
@@ -747,6 +834,43 @@ PYBIND11_MODULE(cpp_sim, m) {
             return py::make_tuple(d.steps, d.harvest_invalid, d.harvest_valid,
                                   d.move_away, d.move_closer, d.mutate_steps,
                                   d.gate_adj, d.gate_adj_strong, d.dead);
+        })
+        .def("get_diag_full", [](Sim&s){
+            const auto &d = s.diag;
+            py::dict out;
+            out["steps"] = d.steps;
+            out["harvest_invalid"] = d.harvest_invalid;
+            out["harvest_valid"] = d.harvest_valid;
+            out["move_away"] = d.move_away;
+            out["move_closer"] = d.move_closer;
+            out["mutate_steps"] = d.mutate_steps;
+            out["gate_adj"] = d.gate_adj;
+            out["gate_adj_strong"] = d.gate_adj_strong;
+            out["dead"] = d.dead;
+            // pipeline funnel
+            out["reached_gated"] = d.reached_gated;
+            out["mutated_near_gated"] = d.mutated_near_gated;
+            out["gained_right_trait"] = d.gained_right_trait;
+            out["harvested_gated"] = d.harvested_gated;
+            out["wrong_trait_mut"] = d.wrong_trait_mut;
+            // trait dynamics
+            out["trait_gain_events"] = d.trait_gain_events;
+            out["trait_loss_events"] = d.trait_loss_events;
+            out["mean_strength"] = (d.trait_samples>0) ? (float)(d.sum_strength/d.trait_samples) : 0.0f;
+            out["mean_reach"] = (d.trait_samples>0) ? (float)(d.sum_reach/d.trait_samples) : 0.0f;
+            // ground-truth distances
+            out["mean_dist_food"] = (d.dist_food_samples>0) ? (float)(d.dist_food_sum/d.dist_food_samples) : -1.0f;
+            out["mean_dist_gated"] = (d.dist_gated_samples>0) ? (float)(d.dist_gated_sum/d.dist_gated_samples) : -1.0f;
+            out["moved_closer_gated"] = d.moved_closer_gated;
+            out["moved_away_gated"] = d.moved_away_gated;
+            // gate progress
+            out["max_strength"] = d.max_strength;
+            out["gate_chain_possible"] = d.gate_chain_possible;
+            // reward probe
+            py::list rb;
+            for (int i=0;i<13;i++) rb.append(d.rew_by_action[i]);
+            out["rew_by_action"] = rb;
+            return out;
         })
         .def("set_tile", [](Sim&s,int x,int y,int t){ if (x>=0&&y>=0&&x<s.W&&y<s.H) s.grid[s.idx(x,y)]=t; })
         .def("get_tile", [](Sim&s,int x,int y){ return (x>=0&&y>=0&&x<s.W&&y<s.H)? s.grid[s.idx(x,y)] : -1; })

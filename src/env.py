@@ -161,10 +161,15 @@ class EmergenceGrid:
         self._apply_reward_params()
 
     def get_diag(self):
-        """Return the C++ sim's closed-loop diagnostics tuple:
+        """Return the C++ sim's closed-loop diagnostics tuple (9 fields):
         (steps, harvest_invalid, harvest_valid, move_away, move_closer,
          mutate_steps, gate_adj, gate_adj_strong, dead)."""
         return self._sim.get_diag()
+
+    def get_diag_full(self):
+        """Return the COMPLETE instrumentation dict (pipeline funnel, trait
+        dynamics, ground-truth distances, gate progress, reward probe)."""
+        return self._sim.get_diag_full()
 
     def set_step_frac(self, f: float):
         self.step_frac = float(f)
