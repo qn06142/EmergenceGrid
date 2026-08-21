@@ -103,9 +103,14 @@ struct Sim {
         float nav_alpha = 0.15f;      // PBRS navigation coefficient
         float eat_gain = 15.0f;       // reward for eating food
         float invalid_harvest_pen = 0.5f; // penalty for harvesting with no food adjacent
-        float trait_mut_pen = 1.0f;   // penalty per mutate
+        float trait_mut_pen = 1.0f;   // penalty per mutate (when NOT adjacent to gated)
+        float trait_mut_pen_gated = 0.0f; // mutate penalty when ADJACENT to gated (A: free)
         float gate_gain = 0.8f;       // reward for opening a gate
         float trait_match_bonus = 0.0f; // shaping bonus for adjacent eatable gated food
+        float mutate_gated_gain = 1.5f;  // C: +reward for mutating the RIGHT trait when
+                                         //    adjacent to gated food it then unlocks
+        float wrong_trait_pen = 0.3f;    // C: -reward for mutating WRONG trait when
+                                         //    adjacent to gated food (doesn't unlock it)
     };
     RewardParams rp;
     float step_frac = 0.0f;  // training progress in [0,1], set by Python each update
@@ -426,7 +431,7 @@ struct Sim {
         a.energy=std::max(0.0f,a.energy-SIGNAL_ENERGY);
     }
 
-    void mutate(Agent &a, int act, std::vector<float> &rew) {
+    void mutate(Agent &a, int act, std::vector<float> &rew, bool near_gated=false) {
         if (a.cooldown>0) return;
         Traits &t=a.tr; bool bhard=t.can_hard(), btall=t.can_tall();
         if (act==8) t.strength=std::min(1.0f,t.strength+TRAIT_MUT);
@@ -435,7 +440,10 @@ struct Sim {
         else if (act==11) t.reach=std::max(0.05f,t.reach-TRAIT_MUT);
         else if (act==12) t.speed=std::min(1.0f,t.speed+TRAIT_MUT);
         if (t.strength+t.speed>1.3f){ float s=1.3f/(t.strength+t.speed); t.strength*=s; t.speed*=s; }
-        a.energy=std::max(0.0f,a.energy-rp.trait_mut_pen); rew[a.idx]-=rp.trait_mut_pen;
+        // A: mutation is FREE when adjacent to gated food (so entering the mutate->eat
+        //    loop is not a net loss vs harvesting regular food). Otherwise normal pen.
+        float pen = near_gated ? rp.trait_mut_pen_gated : rp.trait_mut_pen;
+        a.energy=std::max(0.0f,a.energy-pen); rew[a.idx]-=pen;
         // instrumentation: trait-gain / trait-loss events
         if (!bhard && t.can_hard()) { rew[a.idx]+=1.0f; diag.trait_gain_events++; }   // gaining the trait is immediately rewarding
         if (!btall && t.can_tall()) { rew[a.idx]+=1.0f; diag.trait_gain_events++; }   // (mutate penalty is 1.0, so net ~0 unless it unlocks food)
@@ -628,11 +636,27 @@ struct Sim {
             } else if (act == 6) { share(a, rew); r -= ACT_COST_SHARE; }
             else if (act == 7) { signal(a, rew); r -= ACT_COST_SIGNAL; }
             else if (act >= 8 && act <= 12) {
-                mutate(a, act, rew); r -= ACT_COST_MUT; diag.mutate_steps++;
+                bool adj_gated_unlock_before = adj_gated_unlock;
+                mutate(a, act, rew, adj_gated); r -= ACT_COST_MUT; diag.mutate_steps++;
                 if (adj_gated) {
                     diag.mutated_near_gated++;
-                    if (!adj_gated_unlock) diag.wrong_trait_mut++;
-                    else diag.gained_right_trait++;  // mutated adjacent to gated it can now eat
+                    // recompute whether this step's mutation unlocked the adjacent gated food
+                    bool adj_gated_unlock_now = false;
+                    for (int dx=-1;dx<=1;dx++) for (int dy=-1;dy<=1;dy++){
+                        int nx=a.x+dx, ny=a.y+dy; if (nx<0||ny<0||nx>=W||ny>=H) continue;
+                        int t=grid[idx(nx,ny)];
+                        if (t==HARD_NUT && a.tr.can_hard()) adj_gated_unlock_now=true;
+                        if (t==TALL_FRUIT && a.tr.can_tall()) adj_gated_unlock_now=true;
+                    }
+                    if (!adj_gated_unlock_before && adj_gated_unlock_now) {
+                        // C: gained the RIGHT trait -> shaped reward for the mutate->eat transition
+                        diag.gained_right_trait++;
+                        r += rp.mutate_gated_gain;
+                    } else if (!adj_gated_unlock_before && !adj_gated_unlock_now) {
+                        // C: mutated WRONG trait near gated food -> small penalty
+                        diag.wrong_trait_mut++;
+                        r -= rp.wrong_trait_pen;
+                    }
                 }
             }
             // ---- full instrumentation ----
@@ -819,14 +843,19 @@ PYBIND11_MODULE(cpp_sim, m) {
         .def("set_gated_food", [](Sim&s,int v){ s.gated_food=v; })
         .def("set_reward_params", [](Sim&s, float food_pull, float nav_alpha, float eat_gain,
                                       float invalid_harvest_pen, float trait_mut_pen,
-                                      float gate_gain, float trait_match_bonus){
+                                      float trait_mut_pen_gated, float gate_gain,
+                                      float trait_match_bonus, float mutate_gated_gain,
+                                      float wrong_trait_pen){
             s.rp.food_pull = food_pull;
             s.rp.nav_alpha = nav_alpha;
             s.rp.eat_gain = eat_gain;
             s.rp.invalid_harvest_pen = invalid_harvest_pen;
             s.rp.trait_mut_pen = trait_mut_pen;
+            s.rp.trait_mut_pen_gated = trait_mut_pen_gated;
             s.rp.gate_gain = gate_gain;
             s.rp.trait_match_bonus = trait_match_bonus;
+            s.rp.mutate_gated_gain = mutate_gated_gain;
+            s.rp.wrong_trait_pen = wrong_trait_pen;
         })
         .def("set_step_frac", [](Sim&s,float f){ s.step_frac = f; })
         .def("get_diag", [](Sim&s){

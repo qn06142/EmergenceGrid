@@ -61,7 +61,8 @@ def reward_schedule(p, mode='none'):
     """
     rp = dict(food_pull=1.0, nav_alpha=0.15, eat_gain=15.0,
               invalid_harvest_pen=0.5, trait_mut_pen=1.0,
-              gate_gain=0.8, trait_match_bonus=0.0)
+              trait_mut_pen_gated=0.0, gate_gain=0.8, trait_match_bonus=0.0,
+              mutate_gated_gain=1.5, wrong_trait_pen=0.3)
     if mode == 'none' or p is None:
         return rp
     p = max(0.0, min(1.0, p))
