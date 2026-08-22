@@ -434,7 +434,7 @@ struct Sim {
         return 0.0f;
     }
 
-    void share(Agent &a, std::vector<float> &rew) {
+    float share(Agent &a, std::vector<float> &rew) {
         int best=-1; float beste=1e9;
         for (int dx=-1;dx<=1;dx++) for (int dy=-1;dy<=1;dy++){
             if (!dx&&!dy) continue;
@@ -446,8 +446,9 @@ struct Sim {
         if (best>=0){
             Agent &o=agents[best];
             float give=std::min(0.5f, a.energy-1.0f);
-            if (give>0.05f){ a.energy=std::max(0.0f,a.energy-give); o.energy=std::min(E_MAX_F,o.energy+give); a.inv++; rew[a.idx]+=SHARE_GAIN; rew[o.idx]+=SHARE_GAIN; }
+            if (give>0.05f){ a.energy=std::max(0.0f,a.energy-give); o.energy=std::min(E_MAX_F,o.energy+give); a.inv++; rew[o.idx]+=SHARE_GAIN; return SHARE_GAIN; }
         }
+        return 0.0f;
     }
 
     void signal(Agent &a, std::vector<float> &rew) {
@@ -668,7 +669,7 @@ struct Sim {
                 if (adj) { r += harvest(a); diag.harvest_valid++;
                           if (adj_gated_unlock) diag.harvested_gated++; }
                 else     { r -= rp.invalid_harvest_pen; diag.harvest_invalid++; }
-            } else if (act == 6) { share(a, rew); r -= ACT_COST_SHARE; }
+            } else if (act == 6) { r += share(a, rew); r -= ACT_COST_SHARE; }
             else if (act == 7) { signal(a, rew); r -= ACT_COST_SIGNAL; }
             else if (act >= 8 && act <= 12) {
                 bool adj_gated_unlock_before = adj_gated_unlock;

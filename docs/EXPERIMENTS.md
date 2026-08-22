@@ -236,3 +236,41 @@ L3fix2 (L3 retrained on fully-fixed sim): mut_near|reached 0.056->0.123, max_str
 wrong_trait_mut=0.637 + 15-step cooldown flailing remains the final blocker. This is
 now a pure EXPLORATION/CREDIT problem on a correct sim (lever F: shorten cooldown;
 lever G: denser gate shaping; or architecture/PPO change).
+
+## SIM SCOUR (pass 2): full learning-path audit
+
+After the first scour, audited the remaining unscanned functions + the whole Python
+RL path (GAE, rollout, model, PPO update) to be sure nothing else silently distorted
+learning before we hypothesize training fixes.
+
+FOUND + FIXED:
+5. **SHARE REWARD DISCARDED** (cpp/sim.cpp share()): same pattern as #2 -- share()
+   wrote rew[a.idx]+=SHARE_GAIN / rew[o.idx]+=SHARE_GAIN, but rew[a.idx]=r at end of
+   step overwrote the self-reward, and the other-agent reward was correct but the own
+   was lost. Changed share() to return SHARE_GAIN and the caller folds it into r.
+   (Latent until N>1; same landmine as the mutation bug, fixed preemptively.)
+
+VERIFIED CORRECT (no bug):
+- nearest_goal_dist / nearest_food_dist / nearest_gated_dist: correct nav targets.
+- harvest(): consumes tile, grants energy via eat_gain (survival works even when
+  eat_gain_regular=0), returns reward gated correctly. Gated food = the payoff.
+- share/signal: signal only costs energy (no reward write); share fixed above.
+- resolve_gates/hazards/predators: run AFTER the per-agent loop so their rew writes
+  survive line 732 (rew[a.idx]=r). Gate opens at summed pusher strength >= threshold.
+- regen_tiles / respawn_dead / seed_food_ring: gated food + gates have no regen timer
+  (permanent); respawn zeroes energy to 0.3*cap + seeds food nearby.
+- ppo.py RolloutBuffer.compute_gae: standard reversed GAE; next_nonterm correctly
+  zeroes bootstrap on DEATH (dones from sim death flag only, not nstep truncation).
+- ppo.py PPO update: minibatch samples each carry their OWN stored GRU hidden
+  (flat_hid[mb]), so the recurrent recompute uses the correct per-step hidden; no
+  cross-time BPTT (detached) -- standard for RNN-PPO. Ratio clip + ent floor correct.
+- model.py forward()/forward_agent(): consistent food-vector indexing (own[:, -3:]),
+  shared global-grid encoding across agents in an env (grid is identical per env),
+  per-agent local patch + own-state. No shape/channel mismatch.
+- train.py rollout: hidden reset to zero on agent death (line 262), bootstrap_don
+  correctly flags terminal vs alive at nstep end.
+
+CONCLUSION: the sim + learning path are now clean. The only remaining blocker is the
+RL exploration/credit-assignment problem on a genuinely winnable task (wrong_trait_mut
+= 0.637 + 15-step cooldown flailing). All prior negative runs were explained by the
+sim bugs; the scour confirms no further silent distortions remain.
