@@ -122,7 +122,8 @@ def run(n=16, grid=128, k=8, nstep=64, nupd=2000, seed=12345, log_every=50,
         resume=False, respawn=False, curriculum=5, food_seed=0, food_seed_dist=1,
         food_density_div=50, init_ckpt=None, food_regen_mode=2, freeze_vision=False,
         gated_food=1, d_model=256, gru_hidden=256, head_dim=256, ent_floor=0.5,
-        reward_schedule_mode='none', adaptive=False, eat_gain_regular=15.0):
+        reward_schedule_mode='none', adaptive=False, eat_gain_regular=15.0,
+        diag_train=False):
     torch.manual_seed(seed)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     ckpt_dir = fixpath(ckpt_dir)
@@ -217,6 +218,11 @@ def run(n=16, grid=128, k=8, nstep=64, nupd=2000, seed=12345, log_every=50,
         upd_deaths = 0
         upd_harvest = 0
         upd_gateopen = 0
+        # diag_train: per-step gate-context capture to separate BEHAVIOR
+        # (does the agent take MUTATE near an unlocked gated tile?) from CREDIT
+        # (is mean GAE advantage positive there?). Filled only when --diag_train.
+        rollout_ctx = [] if diag_train else None
+        _ctx_bins = {} if diag_train else None  # (act,adj_gated,adj_gated_unlock)->[(adv,1)]
 
         for t in range(nstep):
             # build batched obs (N*K, OBS_DIM) for ONE forward -- a single GPU copy
@@ -254,6 +260,32 @@ def run(n=16, grid=128, k=8, nstep=64, nupd=2000, seed=12345, log_every=50,
                     if d[i] and envs[e].agents[i].alive is False:
                         upd_deaths += 1
                 next_obs.append(o)
+                # ---- diag_train context capture (after step) ----
+                if rollout_ctx is not None:
+                    grid_e = envs[e].grid
+                    W_e = envs[e].W
+                    da = envs[e]._sim.dump_agents()
+                    for i in range(n):
+                        a = da[i]
+                        ax, ay = a['x'], a['y']
+                        adj_gated = False
+                        adj_gated_unlock = False
+                        dg = 999
+                        for dx in (-1, 0, 1):
+                            for dy in (-1, 0, 1):
+                                if dx == 0 and dy == 0:
+                                    continue
+                                nx, ny = ax + dx, ay + dy
+                                if 0 <= nx < W_e and 0 <= ny < W_e:
+                                    tt = grid_e[ny * W_e + nx]
+                                    if tt == 2 or tt == 3:  # HARD_NUT / TALL_FRUIT
+                                        adj_gated = True
+                                        dg = min(dg, max(abs(dx), abs(dy)))
+                                        if (tt == 2 and a['can_hard']) or (tt == 3 and a['can_tall']):
+                                            adj_gated_unlock = True
+                        rollout_ctx.append((int(acts_m[i, e].item()), adj_gated,
+                                            adj_gated_unlock, float(a['strength']), dg,
+                                            i, e, t))
                 for i in range(n):
                     rews[e][i] = float(r[i])
                     dones[e][i] = bool(d[i])
@@ -315,14 +347,42 @@ def run(n=16, grid=128, k=8, nstep=64, nupd=2000, seed=12345, log_every=50,
             bufs[i].bootstrap_don = torch.tensor(
                 [1.0 if not envs[e].agents[i].alive else 0.0 for e in range(k)],
                 device=device).detach().cpu()
-            pl, vl, ent = ppo_update_agent(policy, opt, i, bufs[i], device, clip,
+            pl, vl, ent, adv_i = ppo_update_agent(policy, opt, i, bufs[i], device, clip,
                                       ent_coef, vf_coef, n_epochs, minibatch, ent_floor)
             losses.append((pl, vl, ent))
+            # diag_train: bin adv by (action x gate-context) for agent i
+            if rollout_ctx is not None:
+                adv_l = adv_i.reshape(-1)  # (T*B,)
+                for (act_, adj, adju, str_, dg_, ci, ce, ct) in rollout_ctx:
+                    if ci != i:
+                        continue
+                    # map flat (ct, ce) -> position in adv (T,B) with B ordered by e
+                    idx_flat = ct * k + ce
+                    if 0 <= idx_flat < adv_l.numel():
+                        bin_key = (act_, adj, adju)
+                        _ctx_bins.setdefault(bin_key, []).append((float(adv_l[idx_flat]), 1.0))
 
         alive = sum(1 for e in range(k) for i in range(n)
                     if envs[e].agents[i].alive)
         avg_en = sum(envs[e].agents[i].energy
                      for e in range(k) for i in range(n)) / (k * n)
+        # diag_train: print advantage-by-(action x gate-context) table
+        if _ctx_bins is not None and (upd % log_every == 0 or upd == nupd - 1):
+            from collections import defaultdict as _df
+            rows = []
+            for (act_, adj, adju), lst in _ctx_bins.items():
+                n_ = len(lst)
+                mean_adv = sum(v for v, _ in lst) / n_
+                rows.append((act_, adj, adju, n_, mean_adv))
+            # sort by count desc, show every (act,context) seen
+            rows.sort(key=lambda r: -r[3])
+            print(f"  [diag] adv by (act, adj_gated, adj_unlock) -- "
+                  f"BEHAVIOR: low count on (8-12,*,True)? CREDIT: mean_adv sign:", flush=True)
+            for act_, adj, adju, n_, mean_adv in rows:
+                print(f"    act={act_:2d} adj_gated={int(adj)} adj_unlock={int(adju)} "
+                      f"n={n_:5d} mean_adv={mean_adv:+.4f}", flush=True)
+            _ctx_bins.clear()
+            rollout_ctx.clear()
         if ckpt_dir and save_every and (upd % save_every == 0):
             os.makedirs(ckpt_dir, exist_ok=True)
             ip = os.path.join(ckpt_dir, f"{exp_name}_policy_step{upd}.pt")
@@ -409,7 +469,8 @@ def ppo_update_agent(policy, opt, i, buf, device, clip, ent_coef, vf_coef,
             pol_losses.append(pol_loss.detach().cpu())
             vf_losses.append(val_loss.detach().cpu())
     buf.reset()
-    return float(torch.stack(pol_losses).mean()), float(torch.stack(vf_losses).mean()), ent_sum / max(ent_n, 1)
+    return (float(torch.stack(pol_losses).mean()), float(torch.stack(vf_losses).mean()),
+            ent_sum / max(ent_n, 1), adv.detach().cpu())
 
 
 if __name__ == '__main__':
@@ -483,6 +544,12 @@ if __name__ == '__main__':
                    help='CLOSED-LOOP reward adaptation: after each update, read sim '
                         'diagnostics (harvest-spam, move-away, mutate-no-eat, gate-adj, '
                         'death) and REACT by adjusting reward params. Overrides --reward_schedule.')
+    ap.add_argument('--diag_train', action='store_true',
+                   help='INSTRUMENTATION: capture per-step gate-context (adjacent to '
+                        'gated tile? has matching trait? strength) and bin GAE advantage '
+                        'by (action x context). Separates BEHAVIOR (does the policy emit '
+                        'MUTATE near an unlocked gate?) from CREDIT (is mean advantage on '
+                        'that action positive?).')
     args = ap.parse_args()
     run(n=args.n, grid=args.grid, k=args.k, nstep=args.nstep, nupd=args.nupd,
         seed=args.seed, log_every=args.log_every, ckpt_dir=args.ckpt_dir,
@@ -494,4 +561,5 @@ if __name__ == '__main__':
         gated_food=args.gated_food,
         d_model=args.d_model, gru_hidden=args.gru_hidden, head_dim=args.head_dim,
         ent_floor=args.ent_floor, reward_schedule_mode=args.reward_schedule,
-        adaptive=args.adaptive, eat_gain_regular=args.eat_gain_regular)
+        adaptive=args.adaptive, eat_gain_regular=args.eat_gain_regular,
+        diag_train=args.diag_train)
