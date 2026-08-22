@@ -120,7 +120,7 @@ class EmergenceGrid:
         # Default reward params (mirror sim.cpp RewardParams defaults). Override per
         # update via set_reward_params() to anneal during training.
         self.reward_params = dict(
-            food_pull=1.0, nav_alpha=0.15, eat_gain=15.0,
+            food_pull=1.0, nav_alpha=0.15, eat_gain=15.0, eat_gain_regular=15.0,
             invalid_harvest_pen=0.5, trait_mut_pen=1.0,
             trait_mut_pen_gated=0.0,   # A: mutation is FREE when adjacent to gated food
             gate_gain=0.8, trait_match_bonus=0.0,
@@ -151,7 +151,7 @@ class EmergenceGrid:
     def _apply_reward_params(self):
         rp = self.reward_params
         self._sim.set_reward_params(
-            rp['food_pull'], rp['nav_alpha'], rp['eat_gain'],
+            rp['food_pull'], rp['nav_alpha'], rp['eat_gain'], rp['eat_gain_regular'],
             rp['invalid_harvest_pen'], rp['trait_mut_pen'],
             rp['trait_mut_pen_gated'], rp['gate_gain'], rp['trait_match_bonus'],
             rp['mutate_gated_gain'], rp['wrong_trait_pen'])
@@ -159,9 +159,9 @@ class EmergenceGrid:
 
     def set_reward_params(self, **kw):
         """Override reward parameters (e.g. to anneal over training).
-        Supported keys: food_pull, nav_alpha, eat_gain, invalid_harvest_pen,
-        trait_mut_pen, trait_mut_pen_gated, gate_gain, trait_match_bonus,
-        mutate_gated_gain, wrong_trait_pen."""
+        Supported keys: food_pull, nav_alpha, eat_gain, eat_gain_regular,
+        invalid_harvest_pen, trait_mut_pen, trait_mut_pen_gated, gate_gain,
+        trait_match_bonus, mutate_gated_gain, wrong_trait_pen."""
         self.reward_params.update(kw)
         self._apply_reward_params()
 

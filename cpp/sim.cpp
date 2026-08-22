@@ -31,9 +31,13 @@ enum {
 };
 
 // ---- constants ----
-static const int TH_STR=60, TH_REACH=60, TH_GATE=110, TH_PRED=130; // x100
+static const int TH_STR=60, TH_REACH=60, TH_GATE=95, TH_PRED=130; // x100 (gate opens at strength>=0.95; below the 1.0 cap so float rounding reaches it)
 static const int E_MAX=1000;       // energy in int x1000 internally? keep float
-static const float E_MAX_F=10.0f;
+static const float E_MAX_F=50.0f;   // energy cap. MUST be > starting energy so that
+                            // harvesting can actually REFUEL the agent; previously this
+                            // was 10.0 and agents SPAWNED at the cap (a.energy=E_MAX_F),
+                            // the agent could only decay and always starved. That made any
+                            // long-horizon task (gate-opening needs ~105 steps) unwinnable.
 static const float EAT_GAIN=15.0f, OASIS_BONUS=2.5f, HARD_BONUS=1.5f, TALL_BONUS=1.2f;
 static const float GATE_GAIN=0.8f, PRED_GAIN=1.0f, HAZ_PEN=0.5f;
 static const float SHARE_GAIN=0.4f, SIGNAL_ENERGY=0.05f;
@@ -101,7 +105,11 @@ struct Sim {
     struct RewardParams {
         float food_pull = 1.0f;       // potential pull toward food
         float nav_alpha = 0.15f;      // PBRS navigation coefficient
-        float eat_gain = 15.0f;       // reward for eating food
+        float eat_gain = 15.0f;       // reward for eating GATED food (HARD_NUT/TALL_FRUIT)
+        float eat_gain_regular = 15.0f; // reward for eating REGULAR food (FOOD/OASIS).
+                                         // Phase-2 env sets this to 0 so harvest-spam gives
+                                         // energy (survival) but NO reward -> only gated/gate
+                                         // food pays, forcing the agent off the spam optimum.
         float invalid_harvest_pen = 0.5f; // penalty for harvesting with no food adjacent
         float trait_mut_pen = 1.0f;   // penalty per mutate (when NOT adjacent to gated)
         float trait_mut_pen_gated = 0.0f; // mutate penalty when ADJACENT to gated (A: free)
@@ -294,7 +302,7 @@ struct Sim {
             Agent a; a.idx=i; a.tr=sample_traits(archs[i%archs.size()]);
             int tries=0;
             while(tries++<10000){ int x=rng()%(W-4)+2, y=rng()%(W-4)+2; if (grid[idx(x,y)]==EMPTY){ a.x=x; a.y=y; break; } }
-            a.energy=E_MAX_F; a.inv=0; a.alive=true; a.last_action=0; a.cooldown=0;
+            a.energy=0.6f*E_MAX_F; a.inv=0; a.alive=true; a.last_action=0; a.cooldown=0;
             agents.push_back(a);
         }
         for (auto &a:agents) occ[idx(a.x,a.y)]=a.idx+1;
@@ -352,6 +360,26 @@ struct Sim {
         return best;
     }
 
+    // Navigation TARGET distance: the food/gate the nav potential should pull
+    // toward. In the normal env all food is reward-bearing -> use nearest_food_dist
+    // (which includes gated). In Phase-2 (eat_gain_regular==0) regular food pays
+    // NOTHING, so pulling toward it is a dead compass -> target only the
+    // reward-bearing tiles (gated food + gates). This is what makes the Phase-2
+    // curriculum actually "encourage the gate system" instead of parking on the
+    // (now unrewarding) dense regular food.
+    int nearest_goal_dist(int x, int y) const {
+        if (rp.eat_gain_regular > 0.0f) return nearest_food_dist(x, y);
+        int best = 1e9;
+        for (int yy=0; yy<H; yy++) for (int xx=0; xx<W; xx++) {
+            int t = grid[idx(xx,yy)];
+            if (t==HARD_NUT || t==TALL_FRUIT || t==GATE) {
+                int d = abs(xx-x) + abs(yy-y);
+                if (d < best) best = d;
+            }
+        }
+        return best;
+    }
+
     bool tile_passable(const Agent &a, int t) const {
         if (t==WALL) return false;
         if (t==GAP && !a.tr.can_small()) return false;
@@ -385,8 +413,12 @@ struct Sim {
             if (t==FOOD||t==OASIS){
                 grid[idx(nx,ny)]=EMPTY; foods.push_back({nx,ny}); bucket[bidx(nx,ny)].push_back((int)foods.size()-1);
                 if (food_regen) { regen_t[idx(nx,ny)]=(t==FOOD)?FOOD_REGEN:OASIS_REGEN; regen_type[idx(nx,ny)]=t; }
-                float gain=rp.eat_gain*(t==OASIS?OASIS_BONUS:1.0f);
-                a.energy=std::min(E_MAX_F,a.energy+gain); a.inv++; return gain;
+                // energy: survival always granted (so the agent never starves even
+                // when regular-food reward is 0 in the Phase-2 env). reward: gated by
+                // eat_gain_regular (default = eat_gain; Phase-2 sets it to 0).
+                float egain=rp.eat_gain*(t==OASIS?OASIS_BONUS:1.0f);
+                a.energy=std::min(E_MAX_F,a.energy+egain); a.inv++;
+                return rp.eat_gain_regular*(t==OASIS?OASIS_BONUS:1.0f);
             }
             if (t==HARD_NUT && a.tr.can_hard()){
                 grid[idx(nx,ny)]=EMPTY; foods.push_back({nx,ny}); bucket[bidx(nx,ny)].push_back((int)foods.size()-1);
@@ -546,7 +578,7 @@ struct Sim {
         std::vector<float> rew(n,0.0f);
         std::vector<bool> done(n,false);
         std::vector<int> pre_dist(n);
-        for (auto &a:agents) pre_dist[a.idx] = a.alive ? nearest_food_dist(a.x,a.y) : 1e9;
+        for (auto &a:agents) pre_dist[a.idx] = a.alive ? nearest_goal_dist(a.x,a.y) : 1e9;
         // order: by speed desc (deterministic)
         std::vector<int> order; for (auto &a:agents) if (a.alive) order.push_back(a.idx);
         std::sort(order.begin(),order.end(),[&](int i,int j){ return agents[i].tr.speed>agents[j].tr.speed; });
@@ -592,7 +624,7 @@ struct Sim {
                 r -= BLOCKED_PEN;
             // 2. potential-based navigation reward (Ng et al. PBRS)
             int dist_before = pre_dist[a.idx];
-            int dist_after = nearest_food_dist(a.x, a.y);
+            int dist_after = nearest_goal_dist(a.x, a.y);
             if (dist_before > W + H) dist_before = W + H;
             if (dist_after  > W + H) dist_after  = W + H;
             // Skip the nav bonus once already adjacent (dist<=1): camping on food
@@ -842,13 +874,14 @@ PYBIND11_MODULE(cpp_sim, m) {
         .def("set_food_regen_mode", [](Sim&s,int v){ s.food_regen_mode=v; if (v==0) s.food_regen=false; else s.food_regen=true; })
         .def("set_gated_food", [](Sim&s,int v){ s.gated_food=v; })
         .def("set_reward_params", [](Sim&s, float food_pull, float nav_alpha, float eat_gain,
-                                      float invalid_harvest_pen, float trait_mut_pen,
-                                      float trait_mut_pen_gated, float gate_gain,
-                                      float trait_match_bonus, float mutate_gated_gain,
-                                      float wrong_trait_pen){
+                                      float eat_gain_regular, float invalid_harvest_pen,
+                                      float trait_mut_pen, float trait_mut_pen_gated,
+                                      float gate_gain, float trait_match_bonus,
+                                      float mutate_gated_gain, float wrong_trait_pen){
             s.rp.food_pull = food_pull;
             s.rp.nav_alpha = nav_alpha;
             s.rp.eat_gain = eat_gain;
+            s.rp.eat_gain_regular = eat_gain_regular;
             s.rp.invalid_harvest_pen = invalid_harvest_pen;
             s.rp.trait_mut_pen = trait_mut_pen;
             s.rp.trait_mut_pen_gated = trait_mut_pen_gated;

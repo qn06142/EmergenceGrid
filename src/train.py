@@ -59,7 +59,7 @@ def reward_schedule(p, mode='none'):
     'none'   -> static defaults (control / A-B baseline).
     'linear' -> linear anneal from early->late over p in [0,1].
     """
-    rp = dict(food_pull=1.0, nav_alpha=0.15, eat_gain=15.0,
+    rp = dict(food_pull=1.0, nav_alpha=0.15, eat_gain=15.0, eat_gain_regular=15.0,
               invalid_harvest_pen=0.5, trait_mut_pen=1.0,
               trait_mut_pen_gated=0.0, gate_gain=0.8, trait_match_bonus=0.0,
               mutate_gated_gain=1.5, wrong_trait_pen=0.3)
@@ -122,7 +122,7 @@ def run(n=16, grid=128, k=8, nstep=64, nupd=2000, seed=12345, log_every=50,
         resume=False, respawn=False, curriculum=5, food_seed=0, food_seed_dist=1,
         food_density_div=50, init_ckpt=None, food_regen_mode=2, freeze_vision=False,
         gated_food=1, d_model=256, gru_hidden=256, head_dim=256, ent_floor=0.5,
-        reward_schedule_mode='none', adaptive=False):
+        reward_schedule_mode='none', adaptive=False, eat_gain_regular=15.0):
     torch.manual_seed(seed)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     ckpt_dir = fixpath(ckpt_dir)
@@ -185,7 +185,7 @@ def run(n=16, grid=128, k=8, nstep=64, nupd=2000, seed=12345, log_every=50,
     obs_now = [envs[e].reset() for e in range(k)]
     ep_rew = [[0.0] * n for _ in range(k)]
     # closed-loop adaptive reward state (persisted across updates)
-    rp_state = dict(food_pull=1.0, nav_alpha=0.15, eat_gain=15.0,
+    rp_state = dict(food_pull=1.0, nav_alpha=0.15, eat_gain=15.0, eat_gain_regular=15.0,
                     invalid_harvest_pen=0.5, trait_mut_pen=1.0,
                     gate_gain=0.8, trait_match_bonus=0.0)
     t0 = time.time()
@@ -203,6 +203,10 @@ def run(n=16, grid=128, k=8, nstep=64, nupd=2000, seed=12345, log_every=50,
         else:
             p = upd / max(1, nupd - 1)
             sched = reward_schedule(p, reward_schedule_mode)
+        # Phase-2 curriculum: regular-food reward can be zeroed (energy still granted
+        # in sim.cpp harvest()) so harvest-spam gives no reward -- only gated/gate
+        # food pays. Injected here so it overrides schedule/adaptive values.
+        sched['eat_gain_regular'] = eat_gain_regular
         for e in range(k):
             envs[e].set_step_frac(upd / max(1, nupd - 1))
             envs[e].set_reward_params(**sched)
@@ -470,6 +474,11 @@ if __name__ == '__main__':
                    help='anneal reward params over training (dynamic rewards). '
                         'none=static (control); linear=high pull/low pen early -> '
                         'low pull/high pen late. Tests whether static rewards cap learning.')
+    ap.add_argument('--eat_gain_regular', type=float, default=15.0,
+                   help='reward for eating REGULAR food (FOOD/OASIS). Phase-2 curriculum '
+                        'sets this to 0 so harvest-spam gives energy (survival) but NO '
+                        'reward -- only gated food + gates pay, forcing the agent off the '
+                        'harvest-spam local optimum. Default 15.0 = same as gated eat_gain.')
     ap.add_argument('--adaptive', action='store_true',
                    help='CLOSED-LOOP reward adaptation: after each update, read sim '
                         'diagnostics (harvest-spam, move-away, mutate-no-eat, gate-adj, '
@@ -485,4 +494,4 @@ if __name__ == '__main__':
         gated_food=args.gated_food,
         d_model=args.d_model, gru_hidden=args.gru_hidden, head_dim=args.head_dim,
         ent_floor=args.ent_floor, reward_schedule_mode=args.reward_schedule,
-        adaptive=args.adaptive)
+        adaptive=args.adaptive, eat_gain_regular=args.eat_gain_regular)
