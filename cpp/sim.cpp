@@ -538,8 +538,15 @@ struct Sim {
                         if (food_regen_mode==2){
                             for (int tries=0;tries<2000;tries++){ int tx=rint(1,W-2), ty=rint(1,H-2);
                                 if (grid[idx(tx,ty)]==EMPTY && occ[idx(tx,ty)]==0){ rx=tx; ry=ty; break; } }
+                            // The new food lives at (rx,ry), and regen of THAT cell is
+                            // armed below. The ORIGINAL harvested source cell (i) must be
+                            // disarmed, otherwise regen_t[i] stays <=0 and re-fires every
+                            // tick -> the map floods with food forever. (mode 2 = "food
+                            // stays available but moves", not "infinite spawn".)
+                            regen_t[i]=0; regen_type[i]=MARKER;
                         }
                         grid[idx(rx,ry)]=FOOD; foods.push_back({rx,ry}); bucket[bidx(rx,ry)].push_back((int)foods.size()-1);
+                        if (food_regen_mode==1) { regen_t[idx(rx,ry)]=FOOD_REGEN; regen_type[idx(rx,ry)]=FOOD; }
                     }
                 }
             }
