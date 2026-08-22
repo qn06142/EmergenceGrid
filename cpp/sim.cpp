@@ -120,6 +120,11 @@ struct Sim {
                                          //    adjacent to gated food it then unlocks
         float wrong_trait_pen = 0.3f;    // C: -reward for mutating WRONG trait when
                                          //    adjacent to gated food (doesn't unlock it)
+        float gate_prox_bonus = 0.0f;    // G: dense shaping for being STRONG (>=gate
+                                         //    threshold) AND adjacent to a GATE, so the
+                                         //    final "be strong at the gate" push is
+                                         //    reinforced every step instead of only the
+                                         //    one-shot gate_gain when it opens.
     };
     RewardParams rp;
     float step_frac = 0.0f;  // training progress in [0,1], set by Python each update
@@ -680,6 +685,19 @@ struct Sim {
                 if (t==HARD_NUT) { adj_gated=true; if (a.tr.can_hard()) adj_gated_unlock=true; }
                 if (t==TALL_FRUIT) { adj_gated=true; if (a.tr.can_tall()) adj_gated_unlock=true; }
             }
+            // G: dense gate-proximity shaping. Once the agent is STRONG enough to
+            // open a gate (strength>=TH_GATE) and stands adjacent to a GATE cell,
+            // pay a small continuous bonus every step. This bridges the final
+            // credit gap: the one-shot gate_gain (0.8) only fires the instant the
+            // gate opens, which is too sparse to learn "build up strength THEN go
+            // to the gate". With gate_prox_bonus>0 the policy gets a steady signal
+            // for the complete strong-at-gate state.
+            if (rp.gate_prox_bonus != 0.0f && a.tr.strength >= TH_GATE / 100.0f) {
+                for (int dx=-1;dx<=1;dx++) for (int dy=-1;dy<=1;dy++){
+                    int nx=a.x+dx, ny=a.y+dy; if (nx<0||ny<0||nx>=W||ny>=H) continue;
+                    if (grid[idx(nx,ny)]==GATE) { r += rp.gate_prox_bonus; break; }
+                }
+            }
             if (act == 5) {
                 if (adj) { r += harvest(a); diag.harvest_valid++;
                           if (adj_gated_unlock) diag.harvested_gated++; }
@@ -914,6 +932,7 @@ PYBIND11_MODULE(cpp_sim, m) {
             s.rp.mutate_gated_gain = mutate_gated_gain;
             s.rp.wrong_trait_pen = wrong_trait_pen;
         })
+        .def("set_gate_prox_bonus", [](Sim&s, float v){ s.rp.gate_prox_bonus = v; })
         .def("set_step_frac", [](Sim&s,float f){ s.step_frac = f; })
         .def("get_diag", [](Sim&s){
             const auto &d = s.diag;

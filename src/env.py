@@ -113,19 +113,34 @@ class EmergenceGrid:
         food_density_div: int = 50,
         food_regen_mode: int = 2,  # 0=none, 1=in-place (pocket-feeds), 2=random empty cell
         gated_food: int = 1,  # 0=none, 1=regular+trickle gated, 2=gated-dominant (mutate to eat)
+        reward_preset: str = 'default',  # 'default' | 'gc' (G+C reward-density lever)
     ):
         self._sim = cpp_sim.Sim(width, height, n_agents, seed, curriculum, respawn, food_seed, food_seed_dist, food_density_div)
         self._sim.set_food_regen_mode(food_regen_mode)
         self._sim.set_gated_food(gated_food)
         # Default reward params (mirror sim.cpp RewardParams defaults). Override per
         # update via set_reward_params() to anneal during training.
+        # reward_preset='gc' applies the G+C reward-DENSITY lever
+        # (diagnosed via --diag_train: the only positive gradient in the gate task
+        # is too sparse to learn). It raises trait_match_bonus (bridge mutate->eat),
+        # mutate_gated_gain, sharpens wrong_trait_pen, and adds a dense
+        # gate_prox_bonus for being strong & adjacent to a gate.
+        _PRESETS = {
+            'default': {},
+            'gc': dict(trait_match_bonus=0.4, mutate_gated_gain=3.0,
+                       wrong_trait_pen=0.6, gate_prox_bonus=0.3),
+        }
+        if reward_preset not in _PRESETS:
+            raise ValueError(f"unknown reward_preset={reward_preset!r}")
         self.reward_params = dict(
             food_pull=1.0, nav_alpha=0.15, eat_gain=15.0, eat_gain_regular=15.0,
             invalid_harvest_pen=0.5, trait_mut_pen=1.0,
             trait_mut_pen_gated=0.0,   # A: mutation is FREE when adjacent to gated food
             gate_gain=0.8, trait_match_bonus=0.0,
             mutate_gated_gain=1.5,     # C: +reward for mutating the RIGHT trait near gated
-            wrong_trait_pen=0.3)       # C: -reward for mutating WRONG trait near gated
+            wrong_trait_pen=0.3,       # C: -reward for mutating WRONG trait near gated
+            gate_prox_bonus=0.0)       # G: dense + for strong(>=gate thr) & adjacent to gate
+        self.reward_params.update(_PRESETS[reward_preset])
         self._apply_reward_params()
 
         self.W = width
@@ -155,13 +170,14 @@ class EmergenceGrid:
             rp['invalid_harvest_pen'], rp['trait_mut_pen'],
             rp['trait_mut_pen_gated'], rp['gate_gain'], rp['trait_match_bonus'],
             rp['mutate_gated_gain'], rp['wrong_trait_pen'])
+        self._sim.set_gate_prox_bonus(rp['gate_prox_bonus'])
         self._sim.set_step_frac(getattr(self, 'step_frac', 0.0))
 
     def set_reward_params(self, **kw):
         """Override reward parameters (e.g. to anneal over training).
         Supported keys: food_pull, nav_alpha, eat_gain, eat_gain_regular,
         invalid_harvest_pen, trait_mut_pen, trait_mut_pen_gated, gate_gain,
-        trait_match_bonus, mutate_gated_gain, wrong_trait_pen."""
+        trait_match_bonus, mutate_gated_gain, wrong_trait_pen, gate_prox_bonus."""
         self.reward_params.update(kw)
         self._apply_reward_params()
 
