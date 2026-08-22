@@ -110,23 +110,55 @@ Results (multi-seed harness, mean +/- std over 5 seeds x 400 steps):
 | adaptive | 2 | 0.071 +/- 0.034 | 0.421 +/- 0.243 | 0.740 +/- 0.327 |
 | adaptive | 3 | 0.076 +/- 0.031 | 0.715 +/- 0.112 | 0.719 +/- 0.339 |
 
-Honest conclusions:
-- The controller **mechanically works**: on L1 it cut invalid-harvest rate
-  0.87 -> 0.55 and on L2 0.69 -> 0.42 (lever #1 fired correctly), and it was
-  more *consistent* (lower std) than static.
-- But it did **NOT break the collection ceiling** — collect_rate is flat vs
-  static within noise on both L1 and L2. So dynamic/adaptive rewards are not
-  the crux of the ~10% ceiling.
-- The harness itself **exposed the prior metric flaw**: std is +/- 0.03-0.05,
-  so the earlier "0.112 vs 0.107 vs 0.099" single-seed comparisons were
-  NOISE, not signal. This validates the "our metrics were flawed" concern.
+Honest conclusions (cont.):
+- **L2 funnel (full instrumentation) found the real bottleneck**: the agent
+  REACHES gated food (~0.20/step) and HAS traits, but barely mutates there
+  (mut_near|reached = 0.029 static / 0.098 adaptive) because `harvest=+379`
+  reward dominates net-negative mutate actions. The ~10% ceiling is
+  **reward dominance / credit-assignment**, not navigation or trait access.
+- **D reshaping (free + shaped mutation near gated) FAILED**: EATEN|reached
+  0.098 (D) < 0.130 (static). Making mutation free near gated food wasn't
+  enough — the 15-step cooldown + need to stay-adjacent-and-harvest is a
+  behavior the policy can't sustain, and dense regular-food harvest outcompetes.
 
-## L3 gate-opening is a HORIZON artifact (not a reward problem)
+## nstep=128 horizon hypothesis -- FALSIFIED
 
-`gateopen=0` on L3 is NOT a learning failure. Opening a gate needs cumulative
-strength >= 1.10; starting at 0.35 + 0.12/mutate with a 15-step trait cooldown
-requires ~7 mutations x 15 = **~105 steps**, but `nstep=64`. So gate-opening
-is structurally impossible within an episode. The harness reports
-`gate_reachable_seeds = 0/5` (agent never gets adjacent-with-strength),
-confirming the gate lever (#4) never even had a chance to fire. Fixing L3
-means raising `nstep` (or lowering `TH_GATE` / cooldown), NOT reshaping rewards.
+We raised nstep 64->128 (static reward) on L2 and L3 to test whether the
+episode horizon was the blocker. Funnel results (5 seeds x 400 steps):
+
+| config | curriculum | mut_near\|reached | EATEN\|reached | wrong_trait_mut | max_strength |
+|--------|-----------|-------------------|----------------|-----------------|--------------|
+| static (nstep64) | 2 | 0.029 | 0.130 | 0.39 | - |
+| **nstep128** | 2 | **0.135** (4.7x) | 0.139 (flat) | 0.63 (worse) | - |
+| adaptive (nstep64) | 3 | 0.020 | 0.159 | 0.16 | 0.51 |
+| **nstep128** | 3 | 0.020 | 0.159 | 0.16 | **0.57** (still <1.10) |
+
+- L2: longer episodes let the agent linger+mutate at gated food (mut_near 4.7x),
+  but the chain is STILL not completed (EATEN|reached flat) and wrong-trait
+  flailing got worse (0.63). More attempts, no completion.
+- L3: even with 128 steps, `max_strength` only reached 0.57 (< 1.10 threshold),
+  `gate_chain_possible=False`, `gate_reachable 0/5`. The agent never accumulates
+  strength toward the gate — it optimizes harvest-spam instead.
+
+**Correction to the earlier "L3 is a horizon artifact" note**: the horizon was a
+*necessary* condition we removed, but it was NOT *sufficient*. The actual blocker
+is that the agent rationally takes the easy +15 harvest payoff over the long,
+cooldown-gated, fragile mutate->eat loop. This is a **temporal-credit /
+exploration** problem, not an episode-length problem. Raising nstep alone does
+not fix it.
+
+## What has been ruled out (so we stop re-hypothesizing blindly)
+
+1. Static vs dynamic/adaptive rewards -- no collection gain (mechanically works,
+   doesn't break ceiling).
+2. Reward reshaping at the gated tile (D: free + shaped mutation) -- made the
+   chain worse.
+3. Episode horizon (nstep 64->128) -- more mutate attempts, no completion.
+
+## Remaining honest levers (untested)
+
+- **E**: make gated-food eating worth FAR more than regular (eat_gain gated x5-10)
+  so one completed chain beats a harvest-spam session.
+- **F**: remove/shorten the 15-step mutate cooldown near gated food, or add dense
+  "hold-adjacent-and-harvest" shaping so the policy can sustain the 3-step chain.
+- **G**: lower TH_GATE (1.10) / trait cooldown (15) so the chain is shorter.
