@@ -176,6 +176,12 @@ class EmergenceGrid:
         dynamics, ground-truth distances, gate progress, reward probe)."""
         return self._sim.get_diag_full()
 
+    @property
+    def gate_threshold(self):
+        """Sim's actual gate-opening threshold (TH_GATE/100). Exposed so the
+        funnel/eval uses the REAL value instead of a hardcoded 1.10 that drifts."""
+        return float(self._sim.gate_threshold())
+
     def set_step_frac(self, f: float):
         self.step_frac = float(f)
         self._sim.set_step_frac(float(f))

@@ -73,7 +73,9 @@ def evaluate(ckpt, n=1, grid=64, steps=400, seeds=(12345,), greedy=False,
                         nx, ny = ag.x + dx, ag.y + dy
                         if 0 <= nx < env.W and 0 <= ny < env.H:
                             if env.grid[ny * env.W + nx] == 6:  # GATE
-                                if ag.tr.strength >= 1.10:
+                                # use the SIM's actual gate threshold (TH_GATE/100),
+                                # not a hardcoded 1.10 that drifted from the sim.
+                                if ag.tr.strength >= env.gate_threshold:
                                     gate_reachable = True
             for i in range(n):
                 if env.agents[i].inv > prev_inv[i]:
@@ -150,6 +152,7 @@ def evaluate(ckpt, n=1, grid=64, steps=400, seeds=(12345,), greedy=False,
     rew_mean = [v / len(per_seed) for v in rew_mean]
     return dict(
         n_seeds=len(seeds),
+        gate_threshold=float(env.gate_threshold),
         collect_rate=(m_c, s_c), invalid_rate=(m_i, s_i), away_rate=(m_a, s_a),
         reached_per_step=(fr, fs),
         mut_near_per_reached=(mnr, mns),
@@ -216,7 +219,7 @@ def main():
     print(f"  gated_reach_rate (closer/total) = {p('gated_reach_rate')}")
     print(f"  --- gate progress (L3) ---")
     print(f"  max_strength               = {p('max_strength')}")
-    print(f"  gate_chain_possible        = {R['gate_reachable_seeds']>0 or R['max_strength'][0]>=1.10}")
+    print(f"  gate_chain_possible        = {R['gate_reachable_seeds']>0 or R['max_strength'][0]>=R['gate_threshold']}")
     print(f"  gate_opened (total)        = {R['gate_opened_total']}")
     print(f"  gate_reachable_seeds       = {R['gate_reachable_seeds']}/{R['n_seeds']}")
     gr = R['gate_rate_over_reachable']

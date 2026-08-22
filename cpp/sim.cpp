@@ -964,5 +964,6 @@ PYBIND11_MODULE(cpp_sim, m) {
         .def_readonly("oasis_cells", &Sim::oasis_cells)
         .def_readonly("gate_cells", &Sim::gate_cells)
         .def_readonly("agents", &Sim::agents)
-        .def("adjacent_harvestable", &Sim::adjacent_harvestable);
+        .def("adjacent_harvestable", &Sim::adjacent_harvestable)
+        .def("gate_threshold", [](Sim&s){ return (float)TH_GATE/100.0f; });
 }
