@@ -251,17 +251,18 @@ class EmergenceGrid:
         rew_list = list(rew)
 
         # Potential-Based Reward Shaping (PBRS) for navigation (Ng et al. 1999).
-        # The C++ sim disables its own nav_alpha for curriculum 0 and >= 3.
-        # We fill that gap here so there's always a gradient to move toward food.
+        # NOTE: the C++ sim applies its OWN rp.nav_alpha UNCONDITIONALLY (no
+        # curriculum gate) toward nearest_food_dist when eat_gain_regular>0, and
+        # toward gates/gated food when eat_gain_regular==0. To avoid a double nav
+        # signal in the NORMAL env, this Python food-PBRS is only applied in
+        # Phase-2 (eat_gain_regular==0), where the sim targets GATES and the agent
+        # would otherwise have NO pull toward regular food for survival.
         # Alpha decays with curriculum as complexity grows; do NOT reward camping
         # adjacent (dist <= 1) to prevent the "harvest spam when adjacent" attractor.
         _pbrs_alpha = {0: 0.25, 1: 0.15, 2: 0.10, 3: 0.10, 4: 0.10, 5: 0.10}
-        nav_alpha = _pbrs_alpha.get(self.curriculum, 0.10)
-        # In Phase-2 (eat_gain_regular==0) the sim's nav target is gates/gated food,
-        # NOT regular food. Skip this regular-food PBRS so the two nav signals don't
-        # conflict (otherwise the agent is pulled toward unrewarding regular food).
+        nav_alpha = 0.0
         if self.reward_params.get('eat_gain_regular', 15.0) == 0.0:
-            nav_alpha = 0.0
+            nav_alpha = _pbrs_alpha.get(self.curriculum, 0.10)
         if hasattr(self, '_prev_dist'):
             for i in range(self.n_agents):
                 if self.agents[i].alive:
