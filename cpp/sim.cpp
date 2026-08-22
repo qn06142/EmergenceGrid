@@ -4,7 +4,8 @@
 //     bucket grid and answer nearest-food queries in O(local) per agent.
 //   * occupancy grid (occ[W*H]) replaces the O(N^2) agent-collision scan.
 //   * _agent_at / share / gate / predator use neighbor/bucket lookups.
-// Obs is (N, 49166) float32 -- identical layout to the Python version, so the
+// Obs is (N, 50621) float32 for a 64x64 grid (global 49152 + own 14 + 11x11
+// patch 1452 + food-vector 3) -- identical layout to the Python version, so the
 // PyTorch model + PPO in train.py are untouched.
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
@@ -337,7 +338,14 @@ struct Sim {
                 int bx=cx+dx, by=cy+dy;
                 if (bx<0||bx>=B||by<0||by>=B) continue;
                 for (int fi:bucket[by*B+bx]){
-                    int d=abs(foods[fi][0]-x)+abs(foods[fi][1]-y);
+                    int fx=foods[fi][0], fy=foods[fi][1];
+                    // guard: harvest() re-pushes the EMPTYed cell into the food
+                    // index (and regen adds a NEW cell without removing the old),
+                    // so the index can contain phantom EMPTY tiles. Skip them so
+                    // nav never targets a dead cell.
+                    int ft=grid[idx(fx,fy)];
+                    if (ft!=FOOD && ft!=OASIS) continue;
+                    int d=abs(fx-x)+abs(fy-y);
                     if (d<best){ best=d; if (d<=r) {found=true;} }
                 }
             }
