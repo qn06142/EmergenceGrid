@@ -596,9 +596,12 @@ struct Sim {
                         occ[idx(a.x,a.y)]=0; a.x=nx; a.y=ny; occ[idx(nx,ny)]=a.idx+1; moved_set.push_back(ai);
                     }
                 }
-            } else if (act>=8 && act<=12){ mutate(a,act,rew); rew[ai]-=ACT_COST_MUT; }
-            // NOTE: harvest (act==5) reward is handled in the per-agent reward
-            // section below (so valid/invalid harvest is paid once, and the gain
+            }
+            // NOTE: mutation (8-12), harvest (5), share (6), signal (7) reward is
+            // handled in the per-agent reward section below (so each action is paid
+            // ONCE -- mutate() changes traits there, not here). The move-loop only
+            // moves the agent. (Previously mutate() was ALSO called here, double-
+            // applying the trait change -- a latent bug.)
             // is added to the agent's own reward after PBRS).
         }
         for (auto &a:agents){
@@ -669,7 +672,12 @@ struct Sim {
             else if (act == 7) { signal(a, rew); r -= ACT_COST_SIGNAL; }
             else if (act >= 8 && act <= 12) {
                 bool adj_gated_unlock_before = adj_gated_unlock;
+                float rew_before_mut = rew[a.idx];   // mutate() writes reward here;
                 mutate(a, act, rew, adj_gated); r -= ACT_COST_MUT; diag.mutate_steps++;
+                // fold mutate()'s own reward writes (trait_mut_pen + trait-gain +1.0)
+                // into r, since line 732 does rew[a.idx]=r and would otherwise DISCARD
+                // them (latent bug: mutation penalty/gain was never delivered).
+                r += (rew[a.idx] - rew_before_mut);
                 if (adj_gated) {
                     diag.mutated_near_gated++;
                     // recompute whether this step's mutation unlocked the adjacent gated food

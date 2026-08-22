@@ -251,6 +251,11 @@ class EmergenceGrid:
         # adjacent (dist <= 1) to prevent the "harvest spam when adjacent" attractor.
         _pbrs_alpha = {0: 0.25, 1: 0.15, 2: 0.10, 3: 0.10, 4: 0.10, 5: 0.10}
         nav_alpha = _pbrs_alpha.get(self.curriculum, 0.10)
+        # In Phase-2 (eat_gain_regular==0) the sim's nav target is gates/gated food,
+        # NOT regular food. Skip this regular-food PBRS so the two nav signals don't
+        # conflict (otherwise the agent is pulled toward unrewarding regular food).
+        if self.reward_params.get('eat_gain_regular', 15.0) == 0.0:
+            nav_alpha = 0.0
         if hasattr(self, '_prev_dist'):
             for i in range(self.n_agents):
                 if self.agents[i].alive:

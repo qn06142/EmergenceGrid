@@ -208,3 +208,31 @@ to make the learner *discover* the chain:
 - **Architecture/PPO**: the learner can't hold a ~105-step credit chain; options =
   longer nstep, lower GAE lambda, or a trait-attention head that binds adjacent
   tile type -> mutation action.
+
+## SIM SCOUR (post root-cause): found + fixed 3 more latent bugs
+
+After the energy/threshold fixes, we scoured step()/obs/env for more silent bugs
+that could have distorted learning. Found and fixed:
+
+1. **DOUBLE MUTATE** (cpp/sim.cpp step): `mutate()` was called in BOTH the
+   move-loop (line ~599) and the per-agent reward loop (line ~672). Since mutate()
+   changes traits, every mutation applied +0.24 strength (not 0.12) and set cooldown
+   twice. Removed the move-loop call; mutation now happens once in the reward loop.
+2. **MUTATION REWARD DISCARDED** (cpp/sim.cpp step): mutate() writes its reward
+   (trait_mut_pen + the +1.0 trait-gain) into rew[a.idx], but the per-agent loop ends
+   with `rew[a.idx] = r`, OVERWRITING it. So trait_mut_pen and the trait-gain reward
+   were NEVER delivered to the agent (only ACT_COST_MUT survived). Now folded into r.
+3. **PHASE-2 NAV CONFLICT** (src/env.py step): the Python-side PBRS nav reward pulled
+   toward regular FOOD even when eat_gain_regular=0 (sim nav targets gates). Skipped
+   the food-PBRS in Phase-2 so the two nav signals agree.
+
+VERIFIED CORRECT (no bug): obs layout (OBS_DIM=50621 = global 49152 + own 14 +
+patch 1452 + foodvec 3; agent sees gated food + traits), resolve_gates (sums pusher
+strength, opens at threshold), regen_tiles, spawn_agents, place_oasis (16 gates, all
+reachable per earlier check).
+
+L3fix2 (L3 retrained on fully-fixed sim): mut_near|reached 0.056->0.123, max_strength
+0.34->0.47, mutation reward now delivered (reach+=-11.66). Gate still unopened:
+wrong_trait_mut=0.637 + 15-step cooldown flailing remains the final blocker. This is
+now a pure EXPLORATION/CREDIT problem on a correct sim (lever F: shorten cooldown;
+lever G: denser gate shaping; or architecture/PPO change).
