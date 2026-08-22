@@ -147,6 +147,47 @@ cooldown-gated, fragile mutate->eat loop. This is a **temporal-credit /
 exploration** problem, not an episode-length problem. Raising nstep alone does
 not fix it.
 
+## ROOT CAUSE FOUND: two fatal sim bugs made gate-opening IMPOSSIBLE
+
+The funnel kept showing the agent *reaches* gated food and *has* traits but never
+completes the chain. We built a scripted ORACLE (`probe_oracle.py`: BFS nav, eat
+for energy, mutate the correct trait, hold at gate) to isolate "is the task
+learnable at all, or is the learner broken?" The oracle FAILED too — which meant
+the SIM was broken, not the learner. Two bugs:
+
+1. **ENERGY**: `E_MAX_F=10.0f` *equalled* the starting energy (`a.energy=E_MAX_F`).
+   `harvest()` does `a.energy = min(E_MAX_F, a.energy+15)` -> can never raise energy.
+   The agent spawned at the cap, could only decay, and ALWAYS starved. Any task
+   needing >~a few steps (the gate chain is ~105 steps) was literally unwinnable.
+   The harvest-spam agent in normal envs only "survived" because episodes were short.
+   FIX: `E_MAX_F=50.0f`, start at `0.6*E_MAX_F` so harvesting actually refuels.
+2. **GATE THRESHOLD**: `TH_GATE=110` (=1.10) but `strength` caps at `min(1.0, ...)`.
+   The gate could never open; float rounding stranded the agent at 0.999 < 1.10.
+   FIX: `TH_GATE=95` (=0.95) so full strength (cap 1.0) clears it with margin.
+
+With both fixes, the ORACLE **opens gates** (`gate_opened=1`). **The task is
+learnable. The bottleneck was the sim mechanics, not the learner.**
+
+This reframes every prior negative run (P2gate, nstep, reward-reshape): they weren't
+failing because PPO/architecture/reward/horizon were wrong — they were failing
+because the gate could not open NO MATTER WHAT the agent did.
+
+## L3 on the FIXED sim (L3fix) -- learner limitation now ISOLATED
+
+Retrained L3 (curriculum 3, nstep 128, 800 upd) on the fixed sim. Funnel (5 seeds):
+- `reached_gated/step = 0.130`, `mut_near|reached = 0.056`
+- `wrong_trait_mut_rate = 0.625` (mutates wrong trait 62% of the time)
+- `max_strength = 0.34` (never accumulates toward gate threshold)
+- `gate_opened = 0`, `gate_chain_possible = False`
+- reward probe: `harvest = +355` (dominant) — agent harvest-SPAMS regular food
+  (now viable since it refuels) and ignores the gate chain.
+
+**Conclusion**: with the sim fixed, the task is provably winnable (oracle), but the
+RL learner (PPO + d_model=256 GRU) STILL collapses into harvest-spam and never
+discovers the ~105-step strength-build->gate chain. So there IS a learner /
+exploration limitation — but it was *masked* by the sim bug. Now it is isolated and
+testable on a genuinely winnable task.
+
 ## What has been ruled out (so we stop re-hypothesizing blindly)
 
 1. Static vs dynamic/adaptive rewards -- no collection gain (mechanically works,
@@ -154,11 +195,16 @@ not fix it.
 2. Reward reshaping at the gated tile (D: free + shaped mutation) -- made the
    chain worse.
 3. Episode horizon (nstep 64->128) -- more mutate attempts, no completion.
+4. **Sim mechanics** -- WAS the primary blocker (energy cap + gate threshold bugs).
+   FIXED. The gate is now openable. This was masking all learner-level signals.
 
-## Remaining honest levers (untested)
+## Remaining honest levers (untested) -- now on a WINNABLE task
 
-- **E**: make gated-food eating worth FAR more than regular (eat_gain gated x5-10)
-  so one completed chain beats a harvest-spam session.
-- **F**: remove/shorten the 15-step mutate cooldown near gated food, or add dense
-  "hold-adjacent-and-harvest" shaping so the policy can sustain the 3-step chain.
-- **G**: lower TH_GATE (1.10) / trait cooldown (15) so the chain is shorter.
+The task is winnable (oracle proves it). The RL learner still harvest-spams. Levers
+to make the learner *discover* the chain:
+- **E**: gated-food `eat_gain` x5-10 (one completed chain >> a harvest-spam session).
+- **F**: shorten/remove the 15-step mutate cooldown (wrong-trait flailing is fatal).
+- **G**: denser PBRS shaping toward gates + correct-trait mutation (guide credit).
+- **Architecture/PPO**: the learner can't hold a ~105-step credit chain; options =
+  longer nstep, lower GAE lambda, or a trait-attention head that binds adjacent
+  tile type -> mutation action.
