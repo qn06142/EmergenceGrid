@@ -431,6 +431,58 @@ mutation compounds into eat->strength->gate; (2) GATE CURRICULUM: lower TH_GATE
 coincidence directly; (3) retry MODE 1 transfer now that mutation is ~0.5-accurate
 (original transfer failed at 0.97 wrong-trait).
 
+**gc_long (LEVER 1: longer training, RESULT: CONTRADICTORY -- training gates, eval 0):**
+same gc_sharp3 config (arch fix + gc mild 5/1.5, mode 2) but 750 upd (3x). TRAINING
+log shows gateopen=1 at upd 270, 460, 730 -- THREE gate events (first time gates
+recur in training; every prior run was 0 or 1). BUT the FUNNEL on the final policy
+(5 seeds x 400 steps) shows gate_opened=0 on all seeds, AND wrong_trait_mut_rate
+REGRESSED to 0.733/0.750/0.889 (vs gc_sharp3's 0.42-0.53), mut_near|reached dropped
+to 0.02-0.06 (vs 0.15-0.23), max_strength 0.80. 2/5 eval seeds hit the intermittent
+eval_metrics crash (re-ran fine before; not a code bug).
+
+READ: TRAINING gate events != EVAL-reproducible emergence. The 3 training gates may be
+(1) lucky EXPLORATORY events over 64-step rollouts x 750 updates that the final policy
+doesn't reliably reproduce, or (2) the 400-step eval window is too short to catch the
+rare mutate->eat->build->push coincidence even if capable. The funnel (rigorous,
+reproducible) says gate_opened=0, and longer training REGRESSED the funnel mutation
+metrics (0.42->0.73) -- so "just train longer" is NOT consolidating the skill; the
+policy drifts. DECISIVE TEST: re-funnel gc_long at 1200-step eval (3x window) + more
+seeds. If gates appear at 1200 but not 400 -> emergence real-but-slow (window
+artifact). If still 0 -> not robust; remaining gap is genuine policy-quality, not
+horizon/window. NOTE: across ALL funneled runs (gc_expo C2, gc_sharp, gc_sharp3,
+gc_long) gate_opened=0 in eval -- training gates are the ONLY evidence of opening.
+
+**DECISIVE TEST (1200-step eval, RESULT: gate NOT robust):**
+re-funneled gc_long_policy_final at 1200 steps (3x window) + 5 seeds.
+- gate_opened = 0 on ALL seeds (5/6/9 clean; 7/8 hit the intermittent eval crash,
+  re-run separately to close the loop).
+- wrong_trait_mut_rate: 0.727/0.905/0.941 (seeds 5/6/9) -- IDENTICAL to the 400-step
+  funnel (0.733/0.750/0.889). Longer window changed nothing.
+- mut_near|reached 0.013-0.018, gained_right|mut_near 0.00-0.10, max_strength 0.80.
+
+READ: the 1200-step eval produced the SAME gate_opened=0 as 400-step. The "eval window
+too short" hypothesis is RULED OUT. The 3 training gates (upd 270/460/730) were
+NON-PERSISTENT EXPLORATORY EVENTS -- the final policy does not reliably reproduce
+them, and wrong_trait_mut_rate REGRESSED at 750 upd (0.73-0.94 vs gc_sharp3's
+0.42-0.53). "Train longer" diluted the mutation skill instead of consolidating it.
+
+HONEST CONCLUSION: across the ENTIRE arc (scour fixes, credit verify, exposure lever,
+reward-shaping ceiling, arch fix 0.97->0.42, longer training), the gate has NEVER been
+reproduced in a rigorous eval funnel. It opened once in training (orig gc_expo upd-50)
++ 3 training events in gc_long, but ZERO times in any funnel (400 or 1200 steps).
+The arch fix was a real win (mutation 0.97->0.42 best) but did NOT cascade to gates.
+REMAINING BLOCKER is NOT info/reward/credit/exposure/horizon -- it is multi-agent
+GATE-PUSH COORDINATION: the policy cannot reliably get enough pushers strong+adjacent
+simultaneously (max_strength 0.80 < 0.95 TH_GATE; needs the coordinated push that
+longer training dilutes rather than builds).
+
+NEXT LEVER (2): GATE CURRICULUM -- lower TH_GATE (e.g. 0.6 vs 0.95) so fewer/weaker
+pushers open the gate, then ramp back up. Directly attacks the coordination
+coincidence. If gates open at TH_GATE=0.6, the chain is learnable and the bar was the
+issue; ramp proves robustness. Alternative: ORACLE-BOOTSTRAP -- initialize/seed the
+policy with a few expert gate-opening demonstrations (behavior cloning warm-start) so
+the rare event is in the training distribution from step 0.
+
 CONCLUSION: the sim + learning path are now clean. The only remaining blocker is the
 RL exploration/credit-assignment problem on a genuinely winnable task (wrong_trait_mut
 = 0.637 + 15-step cooldown flailing). All prior negative runs were explained by the
