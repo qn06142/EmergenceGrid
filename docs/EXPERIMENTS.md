@@ -402,6 +402,35 @@ need_reachplus). This gives the policy the "which mutate action unlocks the adja
 gated tile" signal without spatial dilution. Rebuild cpp_sim, retrain mode2+gc(5/1.5),
 funnel.
 
+**gc_sharp3 (architecture fix, RESULT: WORKS, modest but real):**
+needed-trait skip-connection (need_strplus/need_reachplus + trait_w) added to obs +
+model, mode 2 + gc mild (5/1.5), 250 upd. Funnel on final policy (5 seeds):
+- wrong_trait_mut_rate: 0.474 / 0.529 / 0.778 / 0.417 / 0.933 (avg ~0.63). BEST SEEDS
+  (5/6/8) hit 0.42-0.53 -- the LOWEST wrong-trait rates observed across the whole
+  arc (C2=0.973, gc_sharp~0.64, gc_sharp2~0.94). The skip-connection fixes the info
+  drowning: adjacent to HARD_NUT -> str+ (act8) is now directly signaled.
+- gained_right | mut_near: 0.000 / 0.0625 / 0.000 / 0.0909 / 0.000 (2/5 seeds non-zero,
+  vs gc_sharp's 1/5). Right-trait gain happening more reliably.
+- gate_opened: still 0 in all eval seeds (400-step eval too short for the full
+  mutate->eat->build-strength->coordinate-push chain; original upd-50 gate was a lucky
+  stochastic draw).
+
+READ: the architecture diagnosis was CORRECT -- gated-type info was drowned in the
+CNN->GRU pipeline (same bug food_w fixed for navigation). The skip-connection is the
+right fix: wrong-trait mutations dropped to their lowest ever (0.42-0.53 on good
+seeds). But it's not a silver bullet -- even at 0.42 wrong, the downstream chain
+(eat unlocked food -> build strength across agents -> coordinate simultaneous push at
+gate) is a long-horizon multi-agent coincidence that 250-upd training + 400-step eval
+doesn't reliably produce. EXHAUSTED LEVERS: sim bugs (fixed), credit (fine), exposure
+(gc reshapes), reward magnitude (non-monotonic ceiling ~0.64), mutation targeting
+(arch fix -> 0.42). Remaining gap = horizon/coordination, NOT info/reward/credit.
+
+NEXT LEVERS (in payoff order): (1) LONGER training (250->750 upd) so improved
+mutation compounds into eat->strength->gate; (2) GATE CURRICULUM: lower TH_GATE
+(e.g. 0.6 vs 0.95) so pushes succeed more often, then ramp -- attacks the coordination
+coincidence directly; (3) retry MODE 1 transfer now that mutation is ~0.5-accurate
+(original transfer failed at 0.97 wrong-trait).
+
 CONCLUSION: the sim + learning path are now clean. The only remaining blocker is the
 RL exploration/credit-assignment problem on a genuinely winnable task (wrong_trait_mut
 = 0.637 + 15-step cooldown flailing). All prior negative runs were explained by the
