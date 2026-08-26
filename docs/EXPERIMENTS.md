@@ -370,6 +370,38 @@ informed mutation) AND train longer (250->500 upd) so the improved mutation comp
 into eating + strength + gate pushes. The original upd-50 gate was a lucky draw; a
 sharper mutation should raise that draw's probability.
 
+(The funnel section on gc_sharp is above; appended here.)
+
+**gc_sharp2 (harder sharpen, RESULT: INVERTED-U / REGRESSION):**
+gc preset pushed to mutate_gated_gain 8.0, wrong_trait_pen 2.5, mode 2, 500 upd.
+Funnel on final policy (5 seeds; 2 transient eval crashes as before, intermittent):
+- wrong_trait_mut_rate: **0.934 / 0.957 / 0.944** (seeds 6/7/9) -- WORSE than gc_sharp's
+  ~0.64, nearly back to unsharpened C2's 0.973.
+- mut_near | reached: 0.47-0.59 (HIGHER than gc_sharp's 0.10-0.18 -- agent mutates near
+  gated food more, but 94% WRONG).
+- gained_right | mut_near: ~0.003-0.008 (near zero). gate_opened: 0.
+
+READ: reward-magnitude shaping has a NON-MONOTONIC sweet spot. Unsharpened (3/0.6)=0.97,
+mild (5/1.5)=0.64 [BEST], hard (8/2.5)=0.94 [regressed]. The agent cannot learn the
+mapping "adjacent HARD_NUT -> str+ (act8), adjacent TALL_FRUIT -> reach+ (act10)" -- it
+guesses, and stronger penalty just makes it guess wrong MORE confidently. Reward shaping
+alone has HIT ITS CEILING at ~0.64 wrong-trait.
+
+ROOT CAUSE (architecture): the obs DOES encode gated-tile type (12-ch onehot; HARD_NUT=2,
+TALL_FRUIT=3 distinct in the 11x11 patch), but that info lives only in the 121x12 local
+patch which is diluted through CNN->8x8->GRU. model.py already has a comment (line 120)
+noting compact goal info gets "drowned" in the 1469-dim GRU input -- and it solved that
+for NAVIGATION via a food-direction skip-connection (food_w, lines 125-147). The
+gated-TYPE signal has NO such skip-connection. Same bug class, unfixed for traits.
+
+NEXT LEVER (architecture): add a compact "needed-trait" signal to own-state (2 floats:
+need_strplus if adjacent HARD_NUT, need_reachplus if adjacent TALL_FRUIT) + a trait_w
+skip-connection projecting it directly onto actor/critic (analogous to food_w), with
+prior bias actor_w[:,8,0]=+1 (str+ when need_strplus), actor_w[:,10,1]=+1 (reach+ when
+need_reachplus). This gives the policy the "which mutate action unlocks the adjacent
+gated tile" signal without spatial dilution. Rebuild cpp_sim, retrain mode2+gc(5/1.5),
+funnel.
+
 CONCLUSION: the sim + learning path are now clean. The only remaining blocker is the
 RL exploration/credit-assignment problem on a genuinely winnable task (wrong_trait_mut
 = 0.637 + 15-step cooldown flailing). All prior negative runs were explained by the

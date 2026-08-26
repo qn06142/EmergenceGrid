@@ -9,7 +9,7 @@ SPAT_C = 12
 GRID_H = 64
 GRID_W = 64
 SPAT = GRID_H * GRID_W * SPAT_C
-OWN_DIM = 14 + 121 * 12 + 3  # 14 traits + 11x11 patch(121*12) + (food_dx, food_dy, food_dist)
+OWN_DIM = 14 + 121 * 12 + 3 + 2  # 14 traits + 11x11 patch(121*12) + (food_dx, food_dy, food_dist) + (need_strplus, need_reachplus)
 OBS_DIM = SPAT + OWN_DIM  # now includes 5x5 local patch for direct food sight
 NACT = 13
 SPATIAL_POOL = 8  # coarse grid the CNN feature map is pooled to (preserves WHERE)
@@ -148,6 +148,17 @@ class AgentPolicyBatch(nn.Module):
         # Multiplier on the food-skip so it provides a strong guidance signal
         # that RL refines as obstacle avoidance, gates, and traits enter.
         self.food_scale = 2.0
+        # Needed-trait skip-connection (mirrors food_w). The compact "which mutate
+        # action unlocks the adjacent gated tile" signal (need_strplus, need_reachplus)
+        # lives in own[:,-5:-3]; project it directly onto the heads so the policy can
+        # map "adjacent HARD_NUT -> str+ (act8)" / "adjacent TALL_FRUIT -> reach+
+        # (act10)" without the spatial dilution that kept wrong_trait_mut at ~0.94.
+        self.trait_w = nn.Parameter(torch.zeros(N, NACT, 2))
+        self.trait_wc = nn.Parameter(torch.zeros(N, 1, 2))
+        with torch.no_grad():
+            # Prior: prefer the mutate action that unlocks the adjacent gated tile.
+            self.trait_w[:, 8, 0] = 1.0   # str+  (act8) when need_strplus
+            self.trait_w[:, 10, 1] = 1.0  # reach+ (act10) when need_reachplus
 
     def _encode_grid(self, spat_big: torch.Tensor) -> torch.Tensor:
         """(K, H*W, SPAT_C) -> (K, d_model*SPATIAL_POOL^2) via no-pool dilated CNN +
@@ -215,6 +226,14 @@ class AgentPolicyBatch(nn.Module):
         fval = torch.einsum('ic,ikc->ik', self.food_wc.squeeze(1), food)  # (N, K)
         logits = logits + self.food_scale * flog
         value = value + self.food_scale * fval.unsqueeze(-1)
+        # Needed-trait skip-connection: project (need_strplus, need_reachplus) directly
+        # onto the heads so the policy prefers str+ (act8) / reach+ (act10) next to the
+        # matching gated tile. trait is (N, K, 2); trait_w is (N, NACT, 2) -> (N, K, NACT).
+        trait = self._own(obs)[:, :, -5:-3]                   # (N, K, 2)
+        tlog = torch.einsum('iac,ikc->ika', self.trait_w, trait)
+        tval = torch.einsum('ic,ikc->ik', self.trait_wc.squeeze(1), trait)
+        logits = logits + self.food_scale * tlog
+        value = value + self.food_scale * tval.unsqueeze(-1)
         logits = logits.reshape(NK, NACT)
         if action_mask is not None:
             logits = logits.masked_fill(~action_mask, -float('inf'))
@@ -257,6 +276,10 @@ class AgentPolicyBatch(nn.Module):
         food = own[:, -3:]                               # (K, 3)
         logits = logits + self.food_scale * torch.einsum('ac,kc->ka', self.food_w[i], food)
         value = value + self.food_scale * torch.einsum('c,kc->k', self.food_wc[i, 0], food).unsqueeze(-1)
+        # Needed-trait skip-connection (consistent with forward()).
+        trait = own[:, -5:-3]                              # (K, 2)
+        logits = logits + self.food_scale * torch.einsum('ac,kc->ka', self.trait_w[i], trait)
+        value = value + self.food_scale * torch.einsum('c,kc->k', self.trait_wc[i, 0], trait).unsqueeze(-1)
         if action_mask is not None:
             logits = logits.masked_fill(~action_mask, -float('inf'))
         return logits, value, h_new.unsqueeze(0)
@@ -265,5 +288,5 @@ class AgentPolicyBatch(nn.Module):
         return [
             self.grid_bias[i], self.gru_Wih[i], self.gru_Whh[i], self.gru_b[i],
             self.actor_w[i], self.actor_b[i], self.critic_w[i], self.critic_b[i],
-            self.food_w[i], self.food_wc[i]
+            self.food_w[i], self.food_wc[i], self.trait_w[i], self.trait_wc[i]
         ]

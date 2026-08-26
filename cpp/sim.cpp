@@ -53,7 +53,7 @@ static const float ACT_COST_SHARE=0.05f, ACT_COST_SIGNAL=0.05f, ACT_COST_MUT=0.0
 static const float BLOCKED_PEN=0.0f;  // attempted move that hit a wall/agent. Disabled: penalizing moves makes the agent "shy" (hangs back from food/walls). Collection goal takes priority.
 static const int FOOD_REGEN=40, OASIS_REGEN=25;
 static const int CHAN=12;
-static const int OWN_DIM=14 + 121*12 + 3;  // 14 traits + 11x11 patch + (food_dir_x, food_dir_y, food_dist)
+static const int OWN_DIM=14 + 121*12 + 3 + 2;  // 14 traits + 11x11 patch + (food_dir_x, food_dir_y, food_dist) + (need_strplus, need_reachplus)
 
 struct Traits {
     float strength, reach, speed;
@@ -819,6 +819,20 @@ struct Sim {
             { int bx=-1,by=-1,bd=999; for (int y=0;y<H;y++) for (int x=0;x<W;x++){ if (grid[idx(x,y)]==1){ int d=std::abs(x-a.x)+std::abs(y-a.y); if (d<bd){ bd=d; bx=x; by=y; } } }
               if (bx>=0){ float dxn=(float)(bx-a.x), dyn=(float)(by-a.y); float L=std::sqrt(dxn*dxn+dyn*dyn)+1e-6f;
                 o(i,base+14+121*CHAN+0)=dxn/L; o(i,base+14+121*CHAN+1)=dyn/L; o(i,base+14+121*CHAN+2)=std::min(1.0f, bd/40.0f); } }
+            // compact "needed-trait" signal: 1-hot over which mutate action unlocks an
+            // ADJACENT gated tile. HARD_NUT(2) needs str+ (act8); TALL_FRUIT(3) needs
+            // reach+ (act10). Without this, the type lives only in the 11x11 patch and
+            // gets diluted by the CNN->GRU pipeline (same "drowning" bug food_w fixed
+            // for navigation). Mirrors the food-direction skip-connection.
+            { int need_strplus=0, need_reachplus=0;
+              for (int dy=-1;dy<=1;dy++) for (int dx=-1;dx<=1;dx++){
+                int cx=a.x+dx, cy=a.y+dy;
+                if (0<=cx && cx<W && 0<=cy && cy<H){
+                  int t=grid[idx(cx,cy)];
+                  if (t==2) need_strplus=1; else if (t==3) need_reachplus=1;
+                } }
+              o(i,base+14+121*CHAN+3)=(float)need_strplus;
+              o(i,base+14+121*CHAN+4)=(float)need_reachplus; }
         }
         py::list rewlist; for (float r:rew) rewlist.append(r);
         py::list donelist; for (bool d:done) donelist.append(d);
@@ -871,6 +885,20 @@ struct Sim {
             { int bx=-1,by=-1,bd=999; for (int y=0;y<H;y++) for (int x=0;x<W;x++){ if (grid[idx(x,y)]==1){ int d=std::abs(x-a.x)+std::abs(y-a.y); if (d<bd){ bd=d; bx=x; by=y; } } }
               if (bx>=0){ float dxn=(float)(bx-a.x), dyn=(float)(by-a.y); float L=std::sqrt(dxn*dxn+dyn*dyn)+1e-6f;
                 o(i,base+14+121*CHAN+0)=dxn/L; o(i,base+14+121*CHAN+1)=dyn/L; o(i,base+14+121*CHAN+2)=std::min(1.0f, bd/40.0f); } }
+            // compact "needed-trait" signal: 1-hot over which mutate action unlocks an
+            // ADJACENT gated tile. HARD_NUT(2) needs str+ (act8); TALL_FRUIT(3) needs
+            // reach+ (act10). Without this, the type lives only in the 11x11 patch and
+            // gets diluted by the CNN->GRU pipeline (same "drowning" bug food_w fixed
+            // for navigation). Mirrors the food-direction skip-connection.
+            { int need_strplus=0, need_reachplus=0;
+              for (int dy=-1;dy<=1;dy++) for (int dx=-1;dx<=1;dx++){
+                int cx=a.x+dx, cy=a.y+dy;
+                if (0<=cx && cx<W && 0<=cy && cy<H){
+                  int t=grid[idx(cx,cy)];
+                  if (t==2) need_strplus=1; else if (t==3) need_reachplus=1;
+                } }
+              o(i,base+14+121*CHAN+3)=(float)need_strplus;
+              o(i,base+14+121*CHAN+4)=(float)need_reachplus; }
         }
         return obs;
     }
