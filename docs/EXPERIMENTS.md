@@ -270,6 +270,44 @@ VERIFIED CORRECT (no bug):
 - train.py rollout: hidden reset to zero on agent death (line 262), bootstrap_don
   correctly flags terminal vs alive at nstep end.
 
+## Instrumentation + reward-density A/B (Aug 2026)
+
+After scouring the sim/RL path clean (9 bugs fixed) and confirming the gate task is
+mechanically winnable (oracle opens it in ~16 teacher-forced steps), the remaining
+blocker was diagnosed, not guessed.
+
+**`--diag_train` (commit fd88a1d):** bins GAE advantage by (action x gate-context:
+adjacent-to-gated? has matching trait? strength). Result — CREDIT is NOT broken
+(GAE rewards eating gated +3.8..+8.4, full loop +16/+17, correct sign) and BEHAVIOR
+is NOT blocked (policy reaches gated food and mutates there). The bottleneck is
+**STATE SPARSITY**: the favorable (adj_gated=1, adj_unlock=1) state is ~1.3% of
+samples, so the only positive gradient in the task is too rare to learn the
+mutate->eat->build-strength chain. `trait_match_bonus` was hardcoded 0 (dead no-op).
+
+**G+C lever (`--reward_preset gc`, commit f3d7009):** dense reward for the favorable
+state — `trait_match_bonus` 0->0.4 (bridge mutate->eat), `mutate_gated_gain` 1.5->3.0,
+`wrong_trait_pen` 0.3->0.6, new `gate_prox_bonus`=0.3 (every step when strong+adjacent
+to a gate). Default preset unchanged (A/B-able).
+
+**A/B over 50 updates (same seed/curriculum, n=4 k=2 grid=64 eat_gain_regular=0):**
+
+| lever            | n_step | gateopen | harv/step (start->end) | policy            |
+|------------------|--------|----------|------------------------|-------------------|
+| gc (density)     | 64     | 0/50     | 0.078 -> 0.023 (DOWN)  | moved to move+harvest |
+| extend n_step    | 256    | 0/50     | 0.050 -> 0.057 (flat)  | stayed random (ent 2.12) |
+
+**Read:** extending n_step is DISPROVEN — longer horizon doesn't move gates and is 4x
+slower per update (the credit signal already propagates within 64 steps; GAE lam=0.95
+gamma=0.99). The gc lever at least RESHAPED behavior (harvest-spam suppressed 3x) but
+50 updates still didn't close the loop. Conclusion: the cap is NEITHER horizon NOR
+current reward-density magnitude — it's the RAW FREQUENCY of landing in the favorable
+state. The gc shaping needs more exposure to compound.
+
+**Live test (running):** `--reward_preset gc --gated_food 2` (gated-dominant, NO
+regular food, ~82 gated tiles vs ~45 in mode 1) for 200 updates, n_step=64. Tests the
+exposure hypothesis: more frequent landings in (adj_gated=1) -> more chances to hit
+adj_unlock=1 -> gc shaping compounds into gate openings. See `gc_expo_out.txt`.
+
 CONCLUSION: the sim + learning path are now clean. The only remaining blocker is the
 RL exploration/credit-assignment problem on a genuinely winnable task (wrong_trait_mut
 = 0.637 + 15-step cooldown flailing). All prior negative runs were explained by the
