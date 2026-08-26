@@ -316,6 +316,17 @@ gated cells to open -- NOT a re-lock. The oasis behind stays accessible forever.
 to the favorable state is the lever.** n_step extension was the wrong cut; gc density
 + gated-dominant exposure was the right one.
 
+**TRANSFER TEST (A, RESULT: NEGATIVE):** same gc lever on the NATURAL world
+(`--gated_food 1`: regular dense + trickle gated, ~45 gated tiles) for 200 updates,
+n_step=64, identical seed/curriculum. **gateopen=0 across all 200 updates.** The
+policy still engaged the gate task (mutate+harvest dominant, entropy 2.25->1.48) and
+survived (deaths/step=0), but never opened a gate. So the gc lever does NOT transfer
+to the natural world — it only produces gates under FORCED exposure (gated-dominant,
+no regular food to camp on). Interpretation: with regular food available, the agent
+optimizes the dense harvest signal and the gated chain stays too sparse to learn
+within budget. The emergence is real but exposure-dependent; mode 1 needs either more
+gated density, a stronger gc lever, or longer training to transfer.
+
 CONCLUSION: the sim + learning path are now clean. The only remaining blocker is the
 RL exploration/credit-assignment problem on a genuinely winnable task (wrong_trait_mut
 = 0.637 + 15-step cooldown flailing). All prior negative runs were explained by the
