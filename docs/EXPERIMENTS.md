@@ -10,7 +10,7 @@ collected** (`harv/step`, inventory increments), never the harvest-button rate.
 | 0 | open grid, free food | navigate + harvest | ✅ reliable collecting |
 | 1 | + walls | path-find | ✅ reliable, symmetric up/down |
 | 2 | + gated food (needs traits) | **mutate own traits → eat** | ⚠️ **partial: ~8–10% real collection** |
-| 3 | + oases behind gates | mutate strength → open gate → safe food | ❌ gate-opening did not emerge in budget |
+| 3 | + oases behind gates | mutate strength → open gate → safe food | ⚠️ **gate opened at upd 50** with gc lever + gated-dominant food (see Instrumentation A/B) |
 | 4–5 | + hazards / sparse | robustness | not reached |
 
 ## Headline result — Curriculum 2 trait emergence
@@ -303,10 +303,16 @@ gamma=0.99). The gc lever at least RESHAPED behavior (harvest-spam suppressed 3x
 current reward-density magnitude — it's the RAW FREQUENCY of landing in the favorable
 state. The gc shaping needs more exposure to compound.
 
-**Live test (running):** `--reward_preset gc --gated_food 2` (gated-dominant, NO
-regular food, ~82 gated tiles vs ~45 in mode 1) for 200 updates, n_step=64. Tests the
-exposure hypothesis: more frequent landings in (adj_gated=1) -> more chances to hit
-adj_unlock=1 -> gc shaping compounds into gate openings. See `gc_expo_out.txt`.
+**Live test (RESULT: CONFIRMED):** `--reward_preset gc --gated_food 2`
+(gated-dominant, NO regular food, ~82 gated tiles vs ~45 in mode 1) for 200 updates,
+n_step=64. **gateopen=1 at upd 50** — the FIRST gate opening in the project. The
+policy mutated heavily (topact[8:51%] at upd 40-50, the trait-emergence behavior),
+survived on gated food alone (deaths/step=0.000 throughout), and kept evolving
+(coordinated move+harvest, harv/step recovering 0.02->0.12). The gate re-locks after
+opening (no persistent gate state in gated-dominant mode) but the loop is LEARNABLE
+and was learned. **This confirms the diagnosis: state sparsity was the cap, and
+frequency of exposure to the favorable state is the lever.** n_step extension was the
+wrong cut; gc density + gated-dominant exposure was the right one.
 
 CONCLUSION: the sim + learning path are now clean. The only remaining blocker is the
 RL exploration/credit-assignment problem on a genuinely winnable task (wrong_trait_mut
