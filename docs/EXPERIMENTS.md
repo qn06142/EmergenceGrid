@@ -351,6 +351,25 @@ present, sharpen mutate_gated_gain (3.0->8.0) + wrong_trait_pen (0.6->1.5) so th
 correct mutation dominates the 4 wrong. NOTE: the original upd-50 gate was a stochastic
 lucky draw, not reproducible (2 independent re-runs of the same config gated 0/200, 0/300).
 
+**MUTATION-TARGETING LEVER (gc_sharp, RESULT: WORKS, under-powered):**
+gc preset sharpened (mutate_gated_gain 3.0->5.0, wrong_trait_pen 0.6->1.5),
+mode 2 + 250 upd. Funnel on final policy (5 seeds; 3 transient eval crashes, 2 clean
+ran fine on re-run -- intermittent, not a code bug):
+- wrong_trait_mut_rate: 0.973 (C2) -> ~0.41-0.86 (seeds 7/9 ~0.45, seed 5 re-run 0.86).
+  Roughly HALVED. The sharpened reward steers mutation toward the right trait.
+- gained_right | mut_near: 0.000 (C2) -> 0.200 on seed 9 (agent gained the correct
+  trait 20% of the time it mutated near gated food). Chain STAGE engaging.
+- gate_opened: still 0 across all eval seeds (400-step eval; the full
+  mutate->eat->build-strength->coordinate-push chain needs longer than eval exposes,
+  and gate is a rare multi-agent coincidence).
+
+READ: the diagnosis was correct (failure = mutation targeting). The lever works but
+is under-powered + seed-variable. NEXT: sharpen MORE (mutate_gated_gain 5->8,
+wrong_trait_pen 1.5->2.5 so random mutation is net-negative => only confident/obs-
+informed mutation) AND train longer (250->500 upd) so the improved mutation compounds
+into eating + strength + gate pushes. The original upd-50 gate was a lucky draw; a
+sharper mutation should raise that draw's probability.
+
 CONCLUSION: the sim + learning path are now clean. The only remaining blocker is the
 RL exploration/credit-assignment problem on a genuinely winnable task (wrong_trait_mut
 = 0.637 + 15-step cooldown flailing). All prior negative runs were explained by the
