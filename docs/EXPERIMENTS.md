@@ -327,6 +327,30 @@ optimizes the dense harvest signal and the gated chain stays too sparse to learn
 within budget. The emergence is real but exposure-dependent; mode 1 needs either more
 gated density, a stronger gc lever, or longer training to transfer.
 
+**FUNNEL ON C2 FINAL POLICY (honest post-fix metrics, replaces stale L3fix2):**
+mode 2 (gated-dominant) + gc, 300 upd, funnel 1 seed x 400 steps.
+- collect_rate (harv/step) = 0.0083  (agent barely collects)
+- invalid_harvest_rate = 0.868  (87% harvest attempts hit empty space)
+- mut_near | reached = 0.6491  (navigation+mutation works: reaches gated, mutates near it)
+- **gained_right | mut_near = 0.0000**  (NEVER gains the right trait)
+- **wrong_trait_mut_rate = 0.9731**  (97% of mutations are the WRONG trait)
+- max_strength = 1.0 but gate_opened = 0, gate_reachable_seeds = 0/1 (no coordinated push)
+
+READ: the failure is NOT credit, NOT reaching-sparsity. It is **MUTATION TARGETING**:
+the agent reaches gated food and mutates 65% of the time, but 97% of mutations pick
+the wrong trait (5 mutate actions 8-12; only str+ unlocks HARD_NUT, reach+ unlocks
+TALL_FRUIT). So it never unlocks/eats gated food, never builds coordinated strength
+to push the gate. The C/gc shaping rewards "right mutation after the fact" but the
+agent treats mutation as a 1-of-5 lottery with no in-action signal of which trait the
+adjacent gated tile needs. The diag (--diag_train) already showed adj_unlock=1 gets
++adv and adj_unlock=0 gets -adv — so the gradient exists; the agent isn't using it to
+pick the SPECIFIC right mutation. Either (a) the obs doesn't expose gated-tile TYPE
+(HARD_NUT vs TALL_FRUIT) clearly enough to learn the mapping, or (b) the reward isn't
+sharp enough vs the 4 wrong choices. NEXT LEVER: check obs encoding for gated type; if
+present, sharpen mutate_gated_gain (3.0->8.0) + wrong_trait_pen (0.6->1.5) so the 1
+correct mutation dominates the 4 wrong. NOTE: the original upd-50 gate was a stochastic
+lucky draw, not reproducible (2 independent re-runs of the same config gated 0/200, 0/300).
+
 CONCLUSION: the sim + learning path are now clean. The only remaining blocker is the
 RL exploration/credit-assignment problem on a genuinely winnable task (wrong_trait_mut
 = 0.637 + 15-step cooldown flailing). All prior negative runs were explained by the
