@@ -392,6 +392,15 @@ def run(n=16, grid=128, k=8, nstep=64, nupd=2000, seed=12345, log_every=50,
             op = os.path.join(ckpt_dir, f"{exp_name}_opt_step{upd}.pt")
             torch.save({'opt': opt.state_dict(), 'upd': upd + 1}, op)
             print(f"  [ckpt] {os.path.abspath(ip)} ({os.path.getsize(ip)} bytes)", flush=True)
+        # always checkpoint the FINAL update so a completed run never loses its
+        # trained policy (the save_every gate above only fires on multiples).
+        if ckpt_dir and upd == nupd - 1:
+            os.makedirs(ckpt_dir, exist_ok=True)
+            ip = os.path.join(ckpt_dir, f"{exp_name}_policy_final.pt")
+            torch.save(policy.state_dict(), ip)
+            op = os.path.join(ckpt_dir, f"{exp_name}_opt_final.pt")
+            torch.save({'opt': opt.state_dict(), 'upd': upd + 1}, op)
+            print(f"  [ckpt-final] {os.path.abspath(ip)} ({os.path.getsize(ip)} bytes)", flush=True)
         if upd % log_every == 0 or upd == nupd - 1:
             pl = sum(l[0] for l in losses) / n
             vl = sum(l[1] for l in losses) / n
