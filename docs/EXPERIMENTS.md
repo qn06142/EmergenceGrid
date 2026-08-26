@@ -308,11 +308,13 @@ state. The gc shaping needs more exposure to compound.
 n_step=64. **gateopen=1 at upd 50** — the FIRST gate opening in the project. The
 policy mutated heavily (topact[8:51%] at upd 40-50, the trait-emergence behavior),
 survived on gated food alone (deaths/step=0.000 throughout), and kept evolving
-(coordinated move+harvest, harv/step recovering 0.02->0.12). The gate re-locks after
-opening (no persistent gate state in gated-dominant mode) but the loop is LEARNABLE
-and was learned. **This confirms the diagnosis: state sparsity was the cap, and
-frequency of exposure to the favorable state is the lever.** n_step extension was the
-wrong cut; gc density + gated-dominant exposure was the right one.
+(coordinated move+harvest, harv/step recovering 0.02->0.12). NOTE: `gateopen` in the
+training log is the per-update COUNT of gate-open EVENTS; once a gate cell flips
+GATE->EMPTY it is permanent (sim.cpp:525), so after upd 50 there are simply no more
+gated cells to open -- NOT a re-lock. The oasis behind stays accessible forever.
+**This confirms the diagnosis: state sparsity was the cap, and frequency of exposure
+to the favorable state is the lever.** n_step extension was the wrong cut; gc density
++ gated-dominant exposure was the right one.
 
 CONCLUSION: the sim + learning path are now clean. The only remaining blocker is the
 RL exploration/credit-assignment problem on a genuinely winnable task (wrong_trait_mut
