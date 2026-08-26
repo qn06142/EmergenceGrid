@@ -127,8 +127,8 @@ class EmergenceGrid:
         # gate_prox_bonus for being strong & adjacent to a gate.
         _PRESETS = {
             'default': {},
-            'gc': dict(trait_match_bonus=0.4, mutate_gated_gain=5.0,
-                       wrong_trait_pen=1.5, gate_prox_bonus=0.3),
+            'gc': dict(trait_match_bonus=0.4, mutate_gated_gain=8.0,
+                       wrong_trait_pen=2.5, gate_prox_bonus=0.3),
         }
         if reward_preset not in _PRESETS:
             raise ValueError(f"unknown reward_preset={reward_preset!r}")
