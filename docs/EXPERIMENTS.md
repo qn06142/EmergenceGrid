@@ -488,15 +488,20 @@ RL exploration/credit-assignment problem on a genuinely winnable task (wrong_tra
 = 0.637 + 15-step cooldown flailing). All prior negative runs were explained by the
 sim bugs; the scour confirms no further silent distortions remain.
 
-**gc_curric REFUNNEL (FIXED eval_metrics, AUTHORITATIVE): gate_opened on 3/5 seeds (60%):**
-seed5=0, seed6=1, seed7=1, seed8=1, seed9=1 -> TOTAL GATES=3. The earlier "1/5" was an
-ARTIFACT of the eval_metrics gate-adjacency crash hiding seed7/8/9's gates. With the
-fix, 3/5 seeds reproduce the gate in independent 400-step evals. max_strength 0.91-0.97
-on all seeds (clears 0.6 bar); wrong_trait_mut 0.59-0.84 (noisy, eased bar relaxed
-mutation pressure, but chain still closes). CONCLUSION: emergence IS learnable AND
-reproducible (3/5 eval seeds) at TH_GATE=0.6. Not yet at 0.95, 2/5 seeds don't gate
-(robustness gap). Next: gradual TH_GATE anneal 0.6->0.95 (continuous adaptation) to
-scale the demonstrated emergence to real difficulty.
+**gc_curric REFUNNEL (FIXED eval_metrics): gates OBSERVED in eval, but RARE/STOCHASTIC:**
+refunnel run A: seed5=0, seed6=1, seed7=1, seed8=1, seed9=1 (3/5). Re-run of the same
+seeds 6/7/8 (run B): ALL 0. Reason: gate opening is a rare coordinated event and the
+policy SAMPLES stochastically (not greedy), so single 400-step episodes vary run-to-run.
+The "3/5" was ONE stochastic draw, not a stable per-seed property. HONEST READ:
+emergence IS demonstrable (gates open in eval repeatedly: gc_curric seed6 in first
+funnel, seeds 6/7/8/9 in refunnel run A) but it is NOT reliably reproducible per fixed
+seed -- it is a rare event that sometimes happens. To measure a STABLE rate, run
+multiple episodes per seed (stochastic) or greedy eval; single-episode-per-seed counts
+are noisy. max_strength 0.91-0.97 on all seeds (clears 0.6 bar); wrong_trait_mut
+0.59-0.84 (noisy). CONCLUSION: emergence demonstrated (gates open in eval, repeatedly,
+across independent runs) but not yet robust/reliable. Remaining gap: make the
+coordinated push RELIABLE -- gradual TH_GATE anneal 0.6->0.95 + more training so the
+gate-opening event becomes frequent rather than rare.
 
 UPDATED CONCLUSION: the sim, credit assignment, exposure, reward-shaping, and
 architecture (mutation targeting) are all solved/verified. The remaining blocker is
@@ -528,8 +533,9 @@ already callable per-step (hook to set_step_frac like reward params).
 - Sim bugs: fixed (9 scour passes). Credit: verified. Exposure: gc lever works.
 - Reward magnitude: non-monotonic ceiling (~0.64). Arch fix (needed-trait skip): real
   win (wrong_trait 0.97->0.42). Longer training: regressed.
-- GATE CURRICULUM (TH_GATE 0.95->0.6): BREAKTHROUGH -- gate opened in 3/5 eval seeds (60%,
-- Hard ramp 0.8: collapse (abrupt jump fails).
+- GATE CURRICULUM (TH_GATE 0.95->0.6): BREAKTHROUGH -- gates open in eval, REPEATEDLY
+  across independent runs (gc_curric seed6; refunnel run A seeds 6/7/8/9). Demonstrated
+  but RARE/STOCHASTIC (not reliable per fixed seed -- single episodes vary run-to-run).
 - NEXT: gradual TH_GATE anneal 0.6->0.95 on top of gc_curric (continuous adaptation).
   The remaining gap is purely curriculum smoothness + cross-seed robustness, not
   info/reward/credit/architecture. Emergence is demonstrated; scaling to 0.95 is the
