@@ -61,15 +61,20 @@ emergence.
 
 ---
 
-## 4. TRUE measurement (corrected eval_metrics, 5 seeds each)
+## 4. TRUE measurement (corrected eval_metrics, per-cell 6->0, exclude agent-on-gate, 5 seeds)
 
-| Checkpoint | Bar | Agents | gate_opened | EATEN|reached (end-to-end) |
-|------------|-----|--------|-------------|--------------------------|
-| gc_curric  | 0.6 | 4 | **0** | 0.0254 |
-| gc_anneal_n8 | 0.95 | 8 | **0** | 0.0036 |
+| Checkpoint | Bar | Agents | gate_opened | note |
+|------------|-----|--------|-------------|------|
+| gc_curric  | 0.6 | 4 | **seed-8-specific (~16 on seed 8 w/ matching food_seed; 0 on others)** | real but fragile |
+| gc_anneal_n8 | 0.95 | 8 | **0** | absent at real difficulty |
 
-max_strength 0.97–0.98 (agents build strength fine). wrong_trait_mut_rate ~0.74 (mutate,
-but not the gated chain to completion).
+max_strength 0.97–0.98 (agents build strength fine). wrong_trait_mut_rate ~0.74.
+EATEN|reached end-to-end ~0.025 @0.6, ~0.0036 @0.95.
+
+So: the coordinated-push capability EXISTS (seed 8 @0.6 opens the gate repeatedly) but is
+SEED- and FOOD_SEED-DEPENDENT to the point of being non-reproducible across seeds, and does
+NOT transfer to 0.95. Emergence is demonstrated on one specific seed at the easy bar, not
+robust, not at the real difficulty.
 
 ---
 
