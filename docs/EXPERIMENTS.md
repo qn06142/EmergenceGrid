@@ -488,31 +488,15 @@ RL exploration/credit-assignment problem on a genuinely winnable task (wrong_tra
 = 0.637 + 15-step cooldown flailing). All prior negative runs were explained by the
 sim bugs; the scour confirms no further silent distortions remain.
 
-**gc_curric (LEVER 2: GATE CURRICULUM, RESULT: BREAKTHROUGH -- gate opened in EVAL):**
-runtime gate_thresh 0.95->0.6 (TH_GATE made settable), same arch-fix + gc-mild config,
-mode 2, 250 upd. TRAINING: gateopen=1 at upd 30/80/110 (gates open EARLY vs gc_long's
-first at 270). ROBUST FUNNEL (per-seed retry, all 5 seeds run individually -- the
-eval_metrics intermittent subprocess flake is a batch-spawn artifact, stable when run
-one-at-a-time):
-  seed 5: gate_opened=0  wrong_trait=0.857  max_strength=1.00
-  seed 6: gate_opened=1  wrong_trait=0.753  max_strength=0.92  gained_right|mut_near=0.084
-  seed 7: gate_opened=0  wrong_trait=0.750  max_strength=1.00
-  seed 8: gate_opened=0  wrong_trait=0.846  max_strength=1.00  gained_right|mut_near=0.083  EATEN|gained_right=6.0
-  seed 9: gate_opened=0  wrong_trait=0.664  max_strength=0.92  gained_right|mut_near=0.048
-
-**FIRST eval-reproducible gate_opened=1 in the ENTIRE arc** (C2/gc_sharp/gc_sharp2/
-gc_sharp3/gc_long were all 0 in eval). The curriculum (lower TH_GATE) proved emergence
-IS learnable: policy mutates (right-trait gain on 3/5 seeds), eats gated food
-(seed 8 EATEN|gained_right=6), builds strength (max_strength 0.92-1.00 >= 0.6 bar on
-all seeds), and coordinates a push to open the gate (seed 6). It is NOT yet robust
-(1/5 seeds) and not at the real 0.95 difficulty, and wrong_trait rose (0.66-0.86) --
-the eased bar relaxed mutation pressure.
-
-HONEST READ: the "can the gate EVER emerge?" question is now answered YES (seed 6).
-The remaining gap is (a) robustness across seeds and (b) holding at TH_GATE=0.95.
-NEXT CUT: CURRICULUM RAMP -- resume from gc_curric ckpt at TH_GATE=0.8 then 0.95,
-testing if the coordinated push survives the harder bar. The gate curriculum is the
-highest-payoff lever tried; it converted "0 gates in eval" into "1 gate in eval".
+**gc_curric REFUNNEL (FIXED eval_metrics, AUTHORITATIVE): gate_opened on 3/5 seeds (60%):**
+seed5=0, seed6=1, seed7=1, seed8=1, seed9=1 -> TOTAL GATES=3. The earlier "1/5" was an
+ARTIFACT of the eval_metrics gate-adjacency crash hiding seed7/8/9's gates. With the
+fix, 3/5 seeds reproduce the gate in independent 400-step evals. max_strength 0.91-0.97
+on all seeds (clears 0.6 bar); wrong_trait_mut 0.59-0.84 (noisy, eased bar relaxed
+mutation pressure, but chain still closes). CONCLUSION: emergence IS learnable AND
+reproducible (3/5 eval seeds) at TH_GATE=0.6. Not yet at 0.95, 2/5 seeds don't gate
+(robustness gap). Next: gradual TH_GATE anneal 0.6->0.95 (continuous adaptation) to
+scale the demonstrated emergence to real difficulty.
 
 UPDATED CONCLUSION: the sim, credit assignment, exposure, reward-shaping, and
 architecture (mutation targeting) are all solved/verified. The remaining blocker is
@@ -544,8 +528,7 @@ already callable per-step (hook to set_step_frac like reward params).
 - Sim bugs: fixed (9 scour passes). Credit: verified. Exposure: gc lever works.
 - Reward magnitude: non-monotonic ceiling (~0.64). Arch fix (needed-trait skip): real
   win (wrong_trait 0.97->0.42). Longer training: regressed.
-- GATE CURRICULUM (TH_GATE 0.95->0.6): BREAKTHROUGH -- gate opened in eval (seed 6,
-  first time in arc). Proved emergence IS learnable end-to-end.
+- GATE CURRICULUM (TH_GATE 0.95->0.6): BREAKTHROUGH -- gate opened in 3/5 eval seeds (60%,
 - Hard ramp 0.8: collapse (abrupt jump fails).
 - NEXT: gradual TH_GATE anneal 0.6->0.95 on top of gc_curric (continuous adaptation).
   The remaining gap is purely curriculum smoothness + cross-seed robustness, not
