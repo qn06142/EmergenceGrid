@@ -519,3 +519,36 @@ architecture (mutation targeting) are all solved/verified. The remaining blocker
 multi-agent gate-push COORDINATION robustness + threshold scaling, now proven learnable
 via curriculum (gate opened in eval at TH_GATE=0.6). Ramp TH_GATE 0.6->0.95 to close.
 
+**eval_metrics BUG FIX (critical, was corrupting funnels):**
+eval_metrics.py:78 accessed `ag.tr.strength` on `env._sim.agents` (raw cpp_sim Agent,
+which pybind exposes ONLY as idx/x/y/energy/inv/alive/last_action/cooldown -- NO `.tr`).
+Crashed with AttributeError whenever a policy wandered adjacent to a GATE cell, which
+is why funnel seeds "randomly" failed (gc_sharp3/gc_long/gc_curric lost 2/5 seeds to
+it). Fixed: use `env._sim.dump_agents()` (returns dicts with "strength"/"x"/"y"). Now
+all seeds run clean. NOTE: gc_curric seed 6 gate_opened=1 ran WITHOUT the bug (no
+gate-adjacency at that step), so that breakthrough stands; but all prior funnels may
+have undercounted gates due to this flake. Re-funneling gc_curric with the fix to get
+the trustworthy all-5-seed gate rate.
+
+**gc_ramp08 (CURRICULUM RAMP to 0.8, RESULT: COLLAPSE -- direct jump too hard):**
+resumed gc_curric ckpt at TH_GATE=0.8, mode 2, gc mild, 250 upd. TRAINING: gateopen=0
+(all 250 upd); policy COLLAPSED to topact[6:83%] (signal-spam) by upd 249, harv/step
+0.004, ent 0.79. FUNNEL (fixed eval_metrics, all 5 seeds clean): gate_opened=0 on all,
+max_strength=0.51 (<<0.8) -- the policy can't even build strength anymore; the abrupt
+0.6->0.8 bar jump destroyed the learned skill. CONCLUSION: a single hard curriculum
+jump doesn't transfer. The proper ramp is GRADUAL ANNEALING of TH_GATE during training
+(0.6->0.95 across updates), so the policy adapts continuously. set_gate_threshold is
+already callable per-step (hook to set_step_frac like reward params).
+
+**REVISED ARC STATUS:**
+- Sim bugs: fixed (9 scour passes). Credit: verified. Exposure: gc lever works.
+- Reward magnitude: non-monotonic ceiling (~0.64). Arch fix (needed-trait skip): real
+  win (wrong_trait 0.97->0.42). Longer training: regressed.
+- GATE CURRICULUM (TH_GATE 0.95->0.6): BREAKTHROUGH -- gate opened in eval (seed 6,
+  first time in arc). Proved emergence IS learnable end-to-end.
+- Hard ramp 0.8: collapse (abrupt jump fails).
+- NEXT: gradual TH_GATE anneal 0.6->0.95 on top of gc_curric (continuous adaptation).
+  The remaining gap is purely curriculum smoothness + cross-seed robustness, not
+  info/reward/credit/architecture. Emergence is demonstrated; scaling to 0.95 is the
+  open engineering task.
+

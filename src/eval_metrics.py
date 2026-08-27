@@ -67,15 +67,15 @@ def evaluate(ckpt, n=1, grid=64, steps=400, seeds=(12345,), greedy=False,
                         if env.grid[gy * env.W + gx] != 6) if gc else 0
             if after > before:
                 gate_opened += 1
-            for ag in env._sim.agents:
+            for ag in env._sim.dump_agents():
                 for dx in (-1, 0, 1):
                     for dy in (-1, 0, 1):
-                        nx, ny = ag.x + dx, ag.y + dy
+                        nx, ny = ag["x"] + dx, ag["y"] + dy
                         if 0 <= nx < env.W and 0 <= ny < env.H:
                             if env.grid[ny * env.W + nx] == 6:  # GATE
-                                # use the SIM's actual gate threshold (TH_GATE/100),
+                                # use the SIM's actual gate threshold (runtime gate_thresh),
                                 # not a hardcoded 1.10 that drifted from the sim.
-                                if ag.tr.strength >= env.gate_threshold:
+                                if ag["strength"] >= env.gate_threshold:
                                     gate_reachable = True
             for i in range(n):
                 if env.agents[i].inv > prev_inv[i]:
