@@ -589,4 +589,11 @@ the strength incentive from the gate threshold (gate_prox_bonus fires at strengt
 not >=gate_thresh) so agents build strength reliably even at 0.95. gc_anneal_n8 (n=8,
 same anneal) launched to test the more-agents hypothesis.
 
+**gc_anneal_n8 (MORE AGENTS, RESULT: PENDING):** n=8, anneal 0.6->0.95, 250 upd.
+FIRST ATTEMPT CRASHED: init_ckpt=gc_curric (n=4) into an n=8 model -> size mismatch on
+all per-agent params (critic_b [4,1]->[8,1], food_w [4,13,3]->[8,13,3], trait_w
+[4,13,2]->[8,13,2], etc). BUG: init_ckpt resume requires identical agent count.
+RELAUNCHED from scratch (init_ckpt=None) at n=8 with the anneal -- tests if more
+simultaneous pushers make the combined>=0.95 gate reliable. Pending funnel @0.95.
+
 
