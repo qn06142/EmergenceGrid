@@ -176,6 +176,11 @@ class EmergenceGrid:
         self._sim.set_gate_prox_bonus(rp['gate_prox_bonus'])
         self._sim.set_step_frac(getattr(self, 'step_frac', 0.0))
 
+    def set_gate_threshold(self, t):
+        """Curriculum: set the gate-opening bar (combined pusher strength >= t)."""
+        self.gate_thresh = float(t)
+        self._sim.set_gate_threshold(float(t))
+
     def set_reward_params(self, **kw):
         """Override reward parameters (e.g. to anneal over training).
         Supported keys: food_pull, nav_alpha, eat_gain, eat_gain_regular,

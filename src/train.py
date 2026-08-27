@@ -73,6 +73,23 @@ def reward_schedule(p, mode='none'):
     return rp
 
 
+def gate_thresh_schedule(p, start=0.6, end=0.95, mode='linear'):
+    """Anneal the gate-opening bar during training so the policy adapts continuously
+    instead of facing an abrupt jump (which collapses it -- see gc_ramp08).
+
+      - 'none'   -> constant `start` (no anneal; control).
+      - 'linear' -> start -> end over p in [0,1].
+    `start` is the easy curriculum bar the policy already learned (e.g. 0.6 from
+    gc_curric); `end` is the real task difficulty (0.95).
+    """
+    if mode == 'none' or p is None:
+        return float(start)
+    p = max(0.0, min(1.0, p))
+    if mode == 'linear':
+        return float(start) + (float(end) - float(start)) * p
+    return float(start)
+
+
 def clamp(x, lo, hi):
     return max(lo, min(hi, x))
 
@@ -123,7 +140,8 @@ def run(n=16, grid=128, k=8, nstep=64, nupd=2000, seed=12345, log_every=50,
         food_density_div=50, init_ckpt=None, food_regen_mode=2, freeze_vision=False,
         gated_food=1, d_model=256, gru_hidden=256, head_dim=256, ent_floor=0.5,
         reward_schedule_mode='none', adaptive=False, eat_gain_regular=15.0,
-        diag_train=False, reward_preset='default', gate_thresh=0.95):
+        diag_train=False, reward_preset='default', gate_thresh=0.95,
+        gate_thresh_end=0.95, gate_thresh_mode='none'):
     torch.manual_seed(seed)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     ckpt_dir = fixpath(ckpt_dir)
@@ -212,6 +230,13 @@ def run(n=16, grid=128, k=8, nstep=64, nupd=2000, seed=12345, log_every=50,
         for e in range(k):
             envs[e].set_step_frac(upd / max(1, nupd - 1))
             envs[e].set_reward_params(**sched)
+            # Curriculum: anneal the gate-opening bar continuously (start->end) so the
+            # policy adapts instead of facing an abrupt jump (which collapses it).
+            if gate_thresh_mode != 'none':
+                envs[e].set_gate_threshold(
+                    gate_thresh_schedule(upd / max(1, nupd - 1),
+                                        start=gate_thresh, end=gate_thresh_end,
+                                        mode=gate_thresh_mode))
         hid_batched = torch.zeros(n, k, H, device=device)
         for b in bufs:
             b.reset()
@@ -568,6 +593,11 @@ if __name__ == '__main__':
                         "Diagnosed via --diag_train as the credit-sparse bottleneck.")
     ap.add_argument('--gate_thresh', type=float, default=0.95,
                    help="Gate opens at combined pusher strength >= this. Curriculum: lower (e.g. 0.6) to ease multi-agent coordination, then ramp up.")
+    ap.add_argument('--gate_thresh_end', type=float, default=0.95,
+                   help="Gate-threshold anneal END (curriculum ramp). Used when --gate_thresh_mode != none.")
+    ap.add_argument('--gate_thresh_mode', type=str, default='none',
+                   choices=['none', 'linear'],
+                   help="Anneal TH_GATE during training: 'none' = constant, 'linear' = start->end across updates.")
     args = ap.parse_args()
     run(n=args.n, grid=args.grid, k=args.k, nstep=args.nstep, nupd=args.nupd,
         seed=args.seed, log_every=args.log_every, ckpt_dir=args.ckpt_dir,
@@ -581,4 +611,5 @@ if __name__ == '__main__':
         ent_floor=args.ent_floor, reward_schedule_mode=args.reward_schedule,
         adaptive=args.adaptive, eat_gain_regular=args.eat_gain_regular,
         diag_train=args.diag_train, reward_preset=args.reward_preset,
-        gate_thresh=args.gate_thresh)
+        gate_thresh=args.gate_thresh, gate_thresh_end=args.gate_thresh_end,
+        gate_thresh_mode=args.gate_thresh_mode)
