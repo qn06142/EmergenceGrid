@@ -88,6 +88,7 @@ struct Sim {
     bool food_regen=true;        // harvested food regenerates after FOOD_REGEN steps
     int food_regen_mode=2;       // 0=no regen, 1=in-place (pocket-feeds), 2=random empty cell (default: no pocket-feeding)
     int gated_food=1;             // 0=no gated food, 1=regular+trickle of gated (default), 2=gated-dominant (agent must mutate to eat)
+    float gate_thresh=0.95f;      // gate opens when combined pusher strength >= this (curriculum: lower to ease coordination, ramp up)
     std::mt19937 rng;
     std::vector<int> grid;       // H*W
     std::vector<Agent> agents;
@@ -521,7 +522,7 @@ struct Sim {
         float s=0; std::vector<int> pushers;
         for (auto &a:agents){ if (!a.alive) continue;
             for (auto &g:gate_cells){ if (abs(a.x-g[0])+abs(a.y-g[1])==1){ s+=a.tr.strength; pushers.push_back(a.idx); break; } } }
-        if (s>=TH_GATE/100.0f){
+        if (s>=gate_thresh){
             for (auto &g:gate_cells){ if (grid[idx(g[0],g[1])]==GATE) grid[idx(g[0],g[1])]=EMPTY; }
             for (int ai:pushers){ agents[ai].energy=std::min(E_MAX_F,agents[ai].energy+rp.gate_gain); rew[ai]+=rp.gate_gain; }
         }
@@ -692,7 +693,7 @@ struct Sim {
             // gate opens, which is too sparse to learn "build up strength THEN go
             // to the gate". With gate_prox_bonus>0 the policy gets a steady signal
             // for the complete strong-at-gate state.
-            if (rp.gate_prox_bonus != 0.0f && a.tr.strength >= TH_GATE / 100.0f) {
+            if (rp.gate_prox_bonus != 0.0f && a.tr.strength >= gate_thresh) {
                 for (int dx=-1;dx<=1;dx++) for (int dy=-1;dy<=1;dy++){
                     int nx=a.x+dx, ny=a.y+dy; if (nx<0||ny<0||nx>=W||ny>=H) continue;
                     if (grid[idx(nx,ny)]==GATE) { r += rp.gate_prox_bonus; break; }
@@ -740,7 +741,7 @@ struct Sim {
             diag.sum_reach += a.tr.reach;
             diag.trait_samples++;
             if (a.tr.strength > diag.max_strength) diag.max_strength = a.tr.strength;
-            if (a.tr.strength >= TH_GATE/100.0f) diag.gate_chain_possible = 1;
+            if (a.tr.strength >= gate_thresh) diag.gate_chain_possible = 1;
             // ground-truth distances (not the obs proxy)
             int gf = nearest_food_dist(a.x, a.y);
             diag.dist_food_sum += (gf > W+H ? (float)(W+H) : (float)gf);
@@ -767,7 +768,7 @@ struct Sim {
             // gate proximity
             for (int dx=-1;dx<=1;dx++) for (int dy=-1;dy<=1;dy++){
                 int nx=a.x+dx, ny=a.y+dy; if (nx<0||ny>=W||ny>=H) continue;
-                if (grid[idx(nx,ny)]==GATE) { diag.gate_adj++; if (a.tr.strength>=TH_GATE/100.0f) diag.gate_adj_strong++; break; }
+                if (grid[idx(nx,ny)]==GATE) { diag.gate_adj++; if (a.tr.strength>=gate_thresh) diag.gate_adj_strong++; break; }
             }
             // 5. death evaluation
             if (a.energy <= 0) { a.energy = 0; a.alive = false; done[a.idx] = true; r -= DEATH_PEN; occ[idx(a.x, a.y)] = 0; diag.dead++; }
@@ -1019,5 +1020,6 @@ PYBIND11_MODULE(cpp_sim, m) {
         .def_readonly("gate_cells", &Sim::gate_cells)
         .def_readonly("agents", &Sim::agents)
         .def("adjacent_harvestable", &Sim::adjacent_harvestable)
-        .def("gate_threshold", [](Sim&s){ return (float)TH_GATE/100.0f; });
+        .def("gate_threshold", [](Sim&s){ return s.gate_thresh; })
+        .def("set_gate_threshold", [](Sim&s, float t){ s.gate_thresh = t; });
 }

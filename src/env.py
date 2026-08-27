@@ -114,10 +114,12 @@ class EmergenceGrid:
         food_regen_mode: int = 2,  # 0=none, 1=in-place (pocket-feeds), 2=random empty cell
         gated_food: int = 1,  # 0=none, 1=regular+trickle gated, 2=gated-dominant (mutate to eat)
         reward_preset: str = 'default',  # 'default' | 'gc' (G+C reward-density lever)
+        gate_thresh: float = 0.95,  # gate opens at combined pusher strength >= this (curriculum: lower to ease coordination)
     ):
         self._sim = cpp_sim.Sim(width, height, n_agents, seed, curriculum, respawn, food_seed, food_seed_dist, food_density_div)
         self._sim.set_food_regen_mode(food_regen_mode)
         self._sim.set_gated_food(gated_food)
+        self._sim.set_gate_threshold(gate_thresh)
         # Default reward params (mirror sim.cpp RewardParams defaults). Override per
         # update via set_reward_params() to anneal during training.
         # reward_preset='gc' applies the G+C reward-DENSITY lever
@@ -153,6 +155,7 @@ class EmergenceGrid:
         self.food_density_div = food_density_div
         self.food_regen_mode = food_regen_mode
         self.gated_food = gated_food
+        self.gate_thresh = gate_thresh
         self.step_count = 0
 
         self.grid: List[int] = []

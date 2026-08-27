@@ -123,7 +123,7 @@ def run(n=16, grid=128, k=8, nstep=64, nupd=2000, seed=12345, log_every=50,
         food_density_div=50, init_ckpt=None, food_regen_mode=2, freeze_vision=False,
         gated_food=1, d_model=256, gru_hidden=256, head_dim=256, ent_floor=0.5,
         reward_schedule_mode='none', adaptive=False, eat_gain_regular=15.0,
-        diag_train=False, reward_preset='default'):
+        diag_train=False, reward_preset='default', gate_thresh=0.95):
     torch.manual_seed(seed)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     ckpt_dir = fixpath(ckpt_dir)
@@ -133,7 +133,7 @@ def run(n=16, grid=128, k=8, nstep=64, nupd=2000, seed=12345, log_every=50,
                          respawn=respawn, curriculum=curriculum, food_seed=food_seed,
                          food_seed_dist=food_seed_dist, food_density_div=food_density_div,
                          food_regen_mode=food_regen_mode, gated_food=gated_food,
-                         reward_preset=reward_preset)
+                         reward_preset=reward_preset, gate_thresh=gate_thresh)
             for e in range(k)]
     policy = AgentPolicyBatch(n, freeze_vision=freeze_vision,
                               d_model=d_model, gru_hidden=gru_hidden, head_dim=head_dim).to(device)
@@ -566,6 +566,8 @@ if __name__ == '__main__':
                         "(bridge mutate->eat), mutate_gated_gain, sharpens wrong_trait_pen, "
                         "and adds dense gate_prox_bonus for strong+adjacent-to-gate. "
                         "Diagnosed via --diag_train as the credit-sparse bottleneck.")
+    ap.add_argument('--gate_thresh', type=float, default=0.95,
+                   help="Gate opens at combined pusher strength >= this. Curriculum: lower (e.g. 0.6) to ease multi-agent coordination, then ramp up.")
     args = ap.parse_args()
     run(n=args.n, grid=args.grid, k=args.k, nstep=args.nstep, nupd=args.nupd,
         seed=args.seed, log_every=args.log_every, ckpt_dir=args.ckpt_dir,
@@ -578,4 +580,5 @@ if __name__ == '__main__':
         d_model=args.d_model, gru_hidden=args.gru_hidden, head_dim=args.head_dim,
         ent_floor=args.ent_floor, reward_schedule_mode=args.reward_schedule,
         adaptive=args.adaptive, eat_gain_regular=args.eat_gain_regular,
-        diag_train=args.diag_train, reward_preset=args.reward_preset)
+        diag_train=args.diag_train, reward_preset=args.reward_preset,
+        gate_thresh=args.gate_thresh)
