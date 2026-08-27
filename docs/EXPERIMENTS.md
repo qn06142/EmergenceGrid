@@ -570,4 +570,23 @@ engineering (slower anneal / more training / more agents), not fundamental block
 The multi-agent gate-push coordination -- the original "can it ever emerge?" question
 -- has been demonstrated end-to-end.
 
+**gc_anneal2 (SLOWER ANNEAL 500 upd, RESULT: no reliability gain):**
+resumed gc_curric, anneal 0.6->0.95 over 500 upd (2x gc_anneal). TRAINING: gateopen=1 at
+upd 260 (bar ~0.74), 0 at top. FUNNEL @0.95: gate_opened=0 on ALL 5 seeds. max_strength
+= 0.5132 IDENTICAL across all 5 seeds -- agents cap at ~0.51 individual strength in
+eval and never build to open the gate alone. CONCLUSION: anneal SPEED is not the
+reliability dial (gc_anneal 2/5, gc_anneal2 0/5 -- both stochastic, speed didn't help).
+
+DIAGNOSIS (why 0.95 is hard): gate needs combined pusher strength >= 0.95. The
+strength-building behavior is driven by the gate reward, which only fires near the EASY
+0.6 bar (gc_curric funnel max_strength 0.91-0.97) -- at 0.95 that bonus almost never
+fires, so agents cap at ~0.51 and can't open the gate alone. The gate at 0.95 needs 2+
+agents simultaneously adjacent + moderately strong (rare coincidence with n=4).
+
+NEXT RELIABILITY LEVER: MORE AGENTS (n=8) -- many more simultaneous pushers ->
+combined >= 0.95 far more probable, without changing rewards. Alternative: decouple
+the strength incentive from the gate threshold (gate_prox_bonus fires at strength>=0.6
+not >=gate_thresh) so agents build strength reliably even at 0.95. gc_anneal_n8 (n=8,
+same anneal) launched to test the more-agents hypothesis.
+
 
