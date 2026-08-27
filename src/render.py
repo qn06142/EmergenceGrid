@@ -133,7 +133,7 @@ def draw_frame(ax, env, harvests, mean_dist, step, cell=11):
 def render(ckpt, n, grid, steps, out, seed=7, greedy=False, cell=11, fps=8,
             food_seed=0, food_seed_dist=1, curriculum=0, food_density_div=50,
             harvest_bias=0.0, food_regen_mode=2, food_scale=None, gated_food=1,
-            d_model=256, gru_hidden=256, head_dim=256):
+            d_model=256, gru_hidden=256, head_dim=256, gate_thresh=0.95):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     policy = AgentPolicyBatch(n, d_model=d_model, gru_hidden=gru_hidden, head_dim=head_dim).to(device)
     policy.load_state_dict(torch.load(ckpt, map_location=device))
@@ -145,7 +145,8 @@ def render(ckpt, n, grid, steps, out, seed=7, greedy=False, cell=11, fps=8,
                         curriculum=curriculum, food_seed=food_seed,
                         food_seed_dist=food_seed_dist, respawn=True,
                         food_density_div=food_density_div,
-                        food_regen_mode=food_regen_mode, gated_food=gated_food)
+                        food_regen_mode=food_regen_mode, gated_food=gated_food,
+                        gate_thresh=gate_thresh)
     obs = env.reset()
     hid = torch.zeros(n, 1, policy.gru_hidden, device=device)
     frames = []
@@ -229,6 +230,9 @@ if __name__ == '__main__':
     ap.add_argument('--gated_food', type=int, default=1,
                    help='gated food at curriculum>=2: 0=none, 1=regular+trickle gated, '
                         '2=gated-dominant (agent must mutate can_hard/can_tall to eat)')
+    ap.add_argument('--gate_thresh', type=float, default=0.95,
+                   help='gate opens at combined pusher strength >= this (must match the '
+                        'bar the checkpoint was trained at: gc_curric=0.6, gc_anneal=0.95)')
     ap.add_argument('--food_scale', type=float, default=None,
                    help='override directional-prior strength at eval (model default 2.0; '
                         'init_ckpt sets 8.0). Higher = agent commits harder to moving toward food.')
@@ -242,4 +246,5 @@ if __name__ == '__main__':
            food_density_div=a.food_density_div, harvest_bias=a.harvest_bias,
            food_regen_mode=a.food_regen_mode, food_scale=a.food_scale,
            gated_food=a.gated_food,
-           d_model=a.d_model, gru_hidden=a.gru_hidden, head_dim=a.head_dim)
+           d_model=a.d_model, gru_hidden=a.gru_hidden, head_dim=a.head_dim,
+           gate_thresh=a.gate_thresh)
