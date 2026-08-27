@@ -67,10 +67,15 @@ def evaluate(ckpt, n=1, grid=64, steps=400, seeds=(12345,), greedy=False,
             o, r, d, info = env.step(acts_l)
             after_grid = env._sim.grid
             if gc:
+                # Agent positions this step (to exclude agents merely standing on a gate
+                # cell, which the sim writes as 0 = not a real gate opening).
+                occ = {(a.x, a.y) for a in env.agents if a.alive}
                 for (gx, gy) in gc:
                     bi = before_grid[gy * env.W + gx]
                     ai = after_grid[gy * env.W + gx]
-                    if bi == 6 and ai == 0:   # GATE -> EMPTY (real open)
+                    # REAL opening: GATE(6) -> EMPTY(0) via resolve_gates, AND no agent
+                    # occupying the cell (an agent on a gate cell also makes grid 0).
+                    if bi == 6 and ai == 0 and (gx, gy) not in occ:
                         gate_opened += 1
             for ag in env._sim.dump_agents():
                 for dx in (-1, 0, 1):
