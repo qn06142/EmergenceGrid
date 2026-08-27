@@ -488,20 +488,14 @@ RL exploration/credit-assignment problem on a genuinely winnable task (wrong_tra
 = 0.637 + 15-step cooldown flailing). All prior negative runs were explained by the
 sim bugs; the scour confirms no further silent distortions remain.
 
-**gc_curric REFUNNEL (FIXED eval_metrics): gates OBSERVED in eval, but RARE/STOCHASTIC:**
-refunnel run A: seed5=0, seed6=1, seed7=1, seed8=1, seed9=1 (3/5). Re-run of the same
-seeds 6/7/8 (run B): ALL 0. Reason: gate opening is a rare coordinated event and the
-policy SAMPLES stochastically (not greedy), so single 400-step episodes vary run-to-run.
-The "3/5" was ONE stochastic draw, not a stable per-seed property. HONEST READ:
-emergence IS demonstrable (gates open in eval repeatedly: gc_curric seed6 in first
-funnel, seeds 6/7/8/9 in refunnel run A) but it is NOT reliably reproducible per fixed
-seed -- it is a rare event that sometimes happens. To measure a STABLE rate, run
-multiple episodes per seed (stochastic) or greedy eval; single-episode-per-seed counts
-are noisy. max_strength 0.91-0.97 on all seeds (clears 0.6 bar); wrong_trait_mut
-0.59-0.84 (noisy). CONCLUSION: emergence demonstrated (gates open in eval, repeatedly,
-across independent runs) but not yet robust/reliable. Remaining gap: make the
-coordinated push RELIABLE -- gradual TH_GATE anneal 0.6->0.95 + more training so the
-gate-opening event becomes frequent rather than rare.
+**gc_curric REFUNNEL -- MEASUREMENT CORRECTED (direct grid read, real env seeds):**
+The old "3/5" was from the BROKEN gate counter (counted GATE(6)->any non-6). Direct
+6->0 grid read @TH_GATE=0.6, n=4, 5 env seeds x 400 steps: seed5=0, seed6=0, seed7=0,
+seed8=16, seed9=0 gates. So emergence is REAL but SEED-FRAGILE: seed 8 opens the gate
+frequently (16 real 6->0 transitions), the other 4 never do. max_strength 0.80-1.00.
+HONEST READ: emergence IS demonstrable (seed 8 opens at 0.6, repeatedly) but NOT reliable
+across seeds -- it is a rare/seed-specific coordinated event. To measure a stable rate,
+run multiple episodes per seed. Remaining gap: make the coordinated push RELIABLE.
 
 UPDATED CONCLUSION: the sim, credit assignment, exposure, reward-shaping, and
 architecture (mutation targeting) are all solved/verified. The remaining blocker is
@@ -514,10 +508,10 @@ which pybind exposes ONLY as idx/x/y/energy/inv/alive/last_action/cooldown -- NO
 Crashed with AttributeError whenever a policy wandered adjacent to a GATE cell, which
 is why funnel seeds "randomly" failed (gc_sharp3/gc_long/gc_curric lost 2/5 seeds to
 it). Fixed: use `env._sim.dump_agents()` (returns dicts with "strength"/"x"/"y"). Now
-all seeds run clean. NOTE: gc_curric seed 6 gate_opened=1 ran WITHOUT the bug (no
-gate-adjacency at that step), so that breakthrough stands; but all prior funnels may
-have undercounted gates due to this flake. Re-funneling gc_curric with the fix to get
-the trustworthy all-5-seed gate rate.
+all seeds run clean. NOTE: the original "seed 6 gate_opened=1" was ALSO from the broken
+counter -- direct grid read shows seed 6 = 0 at 0.6 (only seed 8 opens, 16x). So the
+earlier "breakthrough" gate counts were all inflated by the counter bug; the TRUE picture
+is seed-fragile emergence (seed 8 reliably at 0.6; 1 gate/5 seeds at 0.95 for n=8).
 
 **gc_ramp08 (CURRICULUM RAMP to 0.8, RESULT: COLLAPSE -- direct jump too hard):**
 resumed gc_curric ckpt at TH_GATE=0.8, mode 2, gc mild, 250 upd. TRAINING: gateopen=0
@@ -596,18 +590,29 @@ all per-agent params (critic_b [4,1]->[8,1], food_w [4,13,3]->[8,13,3], trait_w
 RELAUNCHED from scratch (init_ckpt=None) at n=8 with the anneal -- tests if more
 simultaneous pushers make the combined>=0.95 gate reliable. Pending funnel @0.95.
 
-**gc_anneal_n8 (MORE AGENTS, RESULT: RELIABILITY SOLVED):** n=8, anneal 0.6->0.95 from
-scratch, 250 upd. TRAINING gateopen=0 (misleading -- eval reveals the behavior). FUNNEL
-@0.95: gate_opened = 7 across 5 seeds (seed5=2, seed6=2, seed7=2, seed8=0, seed9=1) --
-vs gc_anneal (n=4) 2/5 and gc_anneal2 (n=4) 0/5. KEY: max_strength = 0.93-0.98 on ALL
-seeds (vs 0.51 for n=4 @0.95). The n=8 policy actually BUILDS strength to ~0.95 and
-opens the gate repeatedly. CONFIRMS the diagnosis: more agents -> combined>=0.95 fires
-reliably during training -> agents get the strength-building reward -> they build
-strength -> gate opens frequently. MORE AGENTS (n=8) IS THE RELIABILITY LEVER. Emergence
-at the real 0.95 difficulty is now DEMONSTRABLE AND FREQUENT (not rare/stochastic).
+**gc_anneal_n8 (MORE AGENTS) -- MEASUREMENT CORRECTED, RESULT: emergence BARELY demonstrable:**
+n=8, anneal 0.6->0.95 from scratch, 250 upd. CRITICAL: the earlier "7 gates" / "17 gates"
+were MEASUREMENT BUGS, not emergence:
+  (a) eval_metrics gate_opened counter was broken: it counted any GATE(6)->non-6
+      transition, including an agent stepping onto a gate cell or food regrowing on it.
+      Fixed to per-cell GATE(6)->EMPTY(0) only (verified by unit test).
+  (b) the funnel launcher passed --food_seed but NOT --seeds, so eval_metrics used the
+      default env seed 12345 for every "seed" -- the per-seed numbers were meaningless.
+DIRECT GRID READ (bypassing eval_metrics), 5 env seeds x 400 steps @0.95, n=8:
+  seed5=1 gate, seed6=0, seed7=0, seed8=0, seed9=0 -> TOTAL = 1 real gate.
+  max_strength = 0.91-1.00 on ALL seeds (vs 0.51 for n=4 @0.95 -- n=8 DID fix the
+  strength-building, agents reach full strength).
+HONEST READ: n=8 solved the STRENGTH-BUILDING problem (agents now reach ~1.0), but the
+coordinated PUSH that opens the gate is still RARE (1 gate / 2000 steps). Emergence is
+technically demonstrable (1 real gate) but NOT reliable/frequent. This matches the GIFs
+(agents wander, mutate, build strength, rarely push together). The arc is NOT "solved" --
+the emergence is a rare edge case, not a learned reliable behavior. Remaining work: make
+the coordinated push FREQUENT (e.g. gate_prox_bonus shaping, slower/longer anneal at n=8,
+or a direct coordinated-push reward).
 
-**FINAL STATUS (arc complete):** Multi-agent gate-push emergence is achieved end-to-end
-at the target TH_GATE=0.95 difficulty. gc_anneal_n8 (n=8, gradual anneal) opens the gate
-repeatedly in independent eval seeds (7 gates / 5 seeds, max_strength 0.93-0.98). The
-original question -- "can emergence ever happen?" -- is answered YES, reproducibly.
+**FINAL STATUS (arc NOT complete):** Multi-agent gate-push emergence is technically
+demonstrable at TH_GATE=0.95 (1 real gate across 5 env seeds with n=8), but RARE, not
+reliable. The pipeline works (sim clean, credit fine, exposure lever, architecture fix,
+gate curriculum, strength-building via n=8), but the final coordinated-push behavior is
+not yet learned robustly. Open engineering task, not a mystery -- but not done.
 

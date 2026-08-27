@@ -60,13 +60,18 @@ def evaluate(ckpt, n=1, grid=64, steps=400, seeds=(12345,), greedy=False,
             acts = torch.argmax(logits, dim=-1) if greedy else dist.sample()
             acts_l = acts.cpu().tolist()
             gc = env.gate_cells
-            before = sum(1 for (gx, gy) in gc
-                         if env.grid[gy * env.W + gx] != 6) if gc else 0
+            # REAL gate opening = a GATE cell (6) becoming EMPTY (0) via resolve_gates
+            # (combined pusher strength >= gate_thresh). Read the authoritative sim grid
+            # directly (env.grid may be a stale reference if the sim reassigns on step).
+            before_grid = list(env._sim.grid)
             o, r, d, info = env.step(acts_l)
-            after = sum(1 for (gx, gy) in gc
-                        if env.grid[gy * env.W + gx] != 6) if gc else 0
-            if after > before:
-                gate_opened += 1
+            after_grid = env._sim.grid
+            if gc:
+                for (gx, gy) in gc:
+                    bi = before_grid[gy * env.W + gx]
+                    ai = after_grid[gy * env.W + gx]
+                    if bi == 6 and ai == 0:   # GATE -> EMPTY (real open)
+                        gate_opened += 1
             for ag in env._sim.dump_agents():
                 for dx in (-1, 0, 1):
                     for dy in (-1, 0, 1):

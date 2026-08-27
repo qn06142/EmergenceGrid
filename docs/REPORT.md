@@ -1,161 +1,123 @@
-# EmergenceGrid — Multi-Agent Emergence Diagnostic & Achievement Report
+# EmergenceGrid — Multi-Agent Emergence: Honest Status Report
 
-## TL;DR
+## TL;DR (corrected)
 
 The question was: *can multi-agent emergence (a coordinated, trait-gated, strength-gated
-gate-push) arise from RL in this sim?* Answer: **YES — and reproducibly at the real task
-difficulty (TH_GATE = 0.95).**
+gate-push) arise from RL in this sim?*
 
-The path was a full diagnostic ladder: fix sim bugs → verify credit → expose the task →
-tune reward magnitude → fix the architecture → lower the gate curriculum → anneal the
-bar up → scale agents. The final configuration (`gc_anneal_n8`: n=8 agents, gradual
-0.6→0.95 anneal) opens the gate **7 times across 5 independent eval seeds** with agents
-building to **0.93–0.98 strength** (the bar is 0.95). Emergence is demonstrated and
-frequent, not a one-off fluke.
+**Honest answer: the emergence is REAL but RARE and seed-fragile — NOT yet a reliable,
+learned behavior.** Direct grid-level measurement (bypassing the broken eval counter)
+shows:
+- At TH_GATE=0.6 (easy bar): 1 of 5 seeds (seed 8) opens the gate repeatedly (16 times
+  in 400 steps); the other 4 never do.
+- At TH_GATE=0.95 (real difficulty, n=8): 1 gate total across 5 seeds × 400 steps.
 
----
+So emergence CAN happen, but it's a fragile coincidence, not a robust skill. The pipeline
+is sound (sim clean, credit fine, exposure/architecture fixes work, agents build full
+strength). The remaining gap is making the coordinated push FREQUENT — an open
+engineering task, not a mystery, but NOT done.
 
-## 1. The task (what "emergence" means here)
-
-Agents must, *without hand-coded scripting*, learn a chained behavior:
-1. **Mutate** the right trait (acts 8/10 = str+/reach+) when adjacent to gated food.
-2. **Eat gated food** — HARD_NUT (type 2) needs str+, TALL_FRUIT (type 3) needs reach+.
-3. **Build strength** by eating (strength rises toward 1.0).
-4. **Coordinate a simultaneous multi-agent push** — the gate opens only when combined
-   pusher strength at adjacent cells ≥ `TH_GATE` (0.95 = real difficulty).
-
-Steps 1–3 are individual; step 4 is the collective emergence. If the gate opens, the
-agents have coordinated.
-
----
-
-## 2. Diagnostic arc (what we found and fixed)
-
-### 2.1 Sim was buggy (9 scour fixes)
-Before any RL, an oracle (hand-scripted correct policy) could NOT open the gate. A
-scour pass (oracle-probe + sim-scour) found and fixed 9 sim bugs in `cpp/sim.cpp`
-(reward-overwrite, double-action-apply, threshold-mismatch, phantom-index, energy-cap
-ordering, nav-conflict, etc.). After fixes, both oracle AND RL could in principle open
-the gate. *A broken sim would have made every downstream result meaningless.*
-
-### 2.2 Credit assignment was fine
-`--diag_train` confirmed per-agent reward/credit was correctly attributed (no global
-reward flooding). Not the blocker.
-
-### 2.3 Exposure / sparsity — the G+C reward lever
-`--diag_train` also showed the only positive gradient in the gate task was too sparse
-to learn. The `reward_preset='gc'` lever (G = reward-density via trait_match_bonus +
-mutate_gated_gain; C = credit-shaping via wrong_trait_pen sharpening + gate_prox_bonus)
-made the signal learnable. Verified as an A/B-able lever (defaults untouched).
-
-### 2.4 Reward magnitude — non-monotonic ceiling (~0.64)
-Reward magnitude was NOT monotonic: cranking it up *regressed* performance (peaked
-around 0.64, then collapsed). The bottleneck was never "reward too small" — it was the
-architecture drowning the gated-tile signal (next section).
-
-### 2.5 Architecture fix — needed-trait skip-connection (REAL win)
-The obs had a compact food-direction vector but the **gated-tile TYPE signal was being
-drowned** in the CNN→GRU pipeline (same bug class that `food_w` skip fixed for
-navigation). Added:
-- `need_strplus` / `need_reachplus` (2 floats) to the observation, after the food-dir
-  vector.
-- `trait_w` (N, NACT, 2) skip-connection in `model.py` with priors `trait_w[:,8,0]=+1`
-  (str+ on need_strplus) and `trait_w[:,10,1]=+1` (reach+ on need_reachplus).
-
-Result: **wrong_trait_mut_rate dropped 0.97 → 0.42** — agents learned to mutate the
-*correct* trait near gated food. This was a genuine architecture fix, verified by
-probing the trained policy's action biases.
-
-### 2.6 Gate curriculum — lower TH_GATE (breakthrough)
-Made `TH_GATE` runtime-settable (`gate_thresh`) instead of compile-time. Lowered it to
-**0.6** so a single strong agent (or easy coordination) opens the gate. `gc_curric`
-opened the gate in eval — **first reproducible emergence**. At 0.6, agents build to
-0.91–0.97 strength (the bar is easy, so strength-building is rewarded).
-
-### 2.7 Hard ramp failed (0.6 → 0.8 collapse)
-Resuming at `TH_GATE=0.8` from the 0.6-trained ckpt **collapsed**: policy drifted to
-signal-spam (topact signal 83%), harvest → 0.004, `max_strength` 0.51. The jump was too
-abrupt. Lesson: curriculum must be *gradual*, not a cliff.
+**IMPORTANT correction:** earlier reports claimed "3/5 gates", "7 gates", and "17 gates".
+ALL of those were MEASUREMENT BUGS in the eval harness, not emergence:
+1. The gate-opened counter counted ANY GATE(6)→non-6 transition (including an agent
+   stepping onto a gate cell, or food regrowing on it) instead of GATE(6)→EMPTY(0) (the
+   real opening). Fixed to per-cell 6→0 only (unit-tested).
+2. The funnel launcher passed `--food_seed` but NOT `--seeds`, so every "seed" ran the
+   same default env seed (12345) — the per-seed numbers were meaningless.
+The numbers below are from direct `env._sim.grid` reads with the correct per-cell 6→0
+logic and proper per-seed env seeds.
 
 ---
 
-## 3. Reliability work (making it hold at 0.95)
+## 1. The task
 
-### 3.1 Gradual anneal 0.6 → 0.95 (gc_anneal, n=4)
-Annealed the bar continuously over 250 updates. Funnel @0.95: **gate_opened = 2/5**.
-FIRST time the gate opened at the REAL difficulty. But the gate was rare/stochastic.
+Agents must learn a chained behavior without scripting:
+1. Mutate the right trait (str+/reach+) near gated food.
+2. Eat gated food (HARD_NUT needs str+, TALL_FRUIT needs reach+).
+3. Build strength by eating (→ ~1.0).
+4. Coordinate a simultaneous multi-agent push — gate opens only when combined pusher
+   strength at adjacent cells ≥ TH_GATE (0.95 = real difficulty).
 
-### 3.2 Slower anneal didn't help (gc_anneal2, n=4, 500 upd)
-0/5 gates @0.95. **Anneal speed is not the dial.** Key clue: `max_strength = 0.51`
-identical across all seeds — agents cap at ~0.51 individual strength at 0.95 because the
-strength-building reward only fires near the easy 0.6 bar. The 0.95 gate needs combined
-strength ≥ 0.95, i.e. 2+ agents simultaneously adjacent — a rare coincidence with n=4.
-
-### 3.3 More agents SOLVES it (gc_anneal_n8, n=8)
-Trained n=8 from scratch (init_ckpt resume requires matching agent count — a bug found
-and documented) with the same 0.6→0.95 anneal. Funnel @0.95:
-- **gate_opened = 7 across 5 seeds** (seed5=2, seed6=2, seed7=2, seed8=0, seed9=1)
-- **max_strength = 0.93–0.98** on ALL seeds (vs 0.51 for n=4)
-
-With 8 agents, the combined≥0.95 gate fires reliably during training, so agents get the
-strength-building reward and build to ~0.95. **More agents (n=8) is the reliability
-lever.** Emergence at the real difficulty is now demonstrable AND frequent.
+Steps 1–3 are individual; step 4 is the collective emergence.
 
 ---
 
-## 4. A real bug we found along the way (eval_metrics)
+## 2. What was actually fixed (real, verified wins)
 
-`eval_metrics.py` accessed `ag.tr.strength` on raw `cpp_sim` Agents, which pybind does
-NOT expose (only `idx/x/y/energy/inv/alive/last_action/cooldown`). The check fired only
-when an agent was adjacent to a gate, so it **silently crashed funnels on gate-near
-seeds** — corrupting results (e.g. gc_curric looked like 1/5 gates when it was 3/5).
-Fixed by using `dump_agents()` (returns proper strength dicts). After the fix, gc_curric
-funnel showed gates on 3/5 seeds.
+- **Sim bugs (9 scour fixes):** oracle + RL couldn't open the gate until fixed. Real.
+- **Credit assignment:** verified fine via --diag_train. Real.
+- **Exposure / G+C reward lever (`reward_preset='gc'`):** makes the gate-task gradient
+  learnable. Real (A/B-able, defaults untouched).
+- **Reward magnitude:** non-monotonic ceiling (~0.64). Real finding — cranking reward
+  regressed, not helped.
+- **Architecture fix (needed-trait skip-connection):** added need_strplus/need_reachplus
+  to obs + trait_w skip with priors. wrong_trait_mut_rate dropped 0.97→0.42. Real win,
+  verified by probing policy action biases.
+- **Gate curriculum (runtime TH_GATE):** made the bar settable (was compile-time). At 0.6
+  the gate demonstrably opens (seed 8). Real.
+- **More agents (n=8):** FIXED the strength-building problem — agents now build to
+  0.91–1.00 strength (vs 0.51 for n=4 at 0.95). Real win (the diagnosis: at 0.95 the
+  strength-building reward only fires when the gate is near-open, which rarely happens
+  with n=4; n=8 makes the combined-strength event fire during training, so agents learn
+  to build strength).
+
+## 3. The remaining gap (NOT solved)
+
+The coordinated PUSH that opens the gate is rare. Direct measurement:
+
+| Checkpoint | Bar | Agents | Real gates (5 env seeds × 400 steps) |
+|------------|-----|--------|--------------------------------------|
+| gc_curric  | 0.6 | 4 | seed8=16, others=0 → 1/5 seeds |
+| gc_anneal_n8 | 0.95 | 8 | 1 total (seed5) → 1/5 seeds barely |
+
+The agents DO: mutate near gated food, build to full strength, navigate. They RARELY
+synchronize the final push. This matches the GIFs (agents wander, harvest, mutate, but
+the gate almost never opens in a 300-step replay).
+
+Why rare? The gate needs 2+ agents simultaneously adjacent AND strong (combined ≥ bar).
+That's a tight coordination coincidence. The reward for it is sparse (only fires on the
+exact frame the gate opens), so RL doesn't reliably learn the synchronized approach.
+
+---
+
+## 4. What would make it reliable (next steps, not yet done)
+
+- **Dense coordinated-push shaping:** reward agents for being strong + adjacent to a gate
+  (gate_prox_bonus exists but may be too weak / thresholded wrong). Decouple the strength
+  incentive from the gate threshold so agents build strength even at 0.95.
+- **Slower / longer anneal at n=8:** gc_anneal_n8 trained 250 upd; more updates at the
+  top bar may consolidate the push.
+- **More agents (n=16):** even more simultaneous pushers → combined ≥0.95 easier.
+- **Greedy/multi-episode eval** to measure a stable rate (single episodes are noisy).
 
 ---
 
 ## 5. Evidence (GIFs)
 
-Rendered per-checkpoint episode replays (greedy, 300 steps, gated_food=2):
-
-- `gifs/gc_curric_gate06.gif` — gate curriculum at TH_GATE=0.6 (trained bar). The gate
-  VISIBLY OPENS. Emergence demonstrable. (n=4)
-- `gifs/gc_sharp3_archfix.gif` — architecture fix (needed-trait skip). Shows agents
-  mutating the correct trait near gated food. (n=4)
-- `gifs/gc_anneal_gate095.gif` — gradual anneal, rendered at the real TH_GATE=0.95.
-  Emergence at target difficulty. (n=4)
-- `gifs/gc_anneal_n8_gate095.gif` — MORE AGENTS (n=8) at 0.95. The reliable emergence:
-  agents build to ~0.95 strength and open the gate repeatedly. (n=8)
-
-To replay any: `python src/render.py --ckpt <ckpt> --n <4|8> --grid 64 --gate_thresh
-<0.6|0.95> --curriculum 3 --gated_food 2 --greedy --out <gif>`
+Rendered stochastic episode replays (greedy was misleading — argmax collapsed to one
+action and looked frozen; stochastic shows the true, mostly-wandering behavior):
+- `gifs/gc_curric_gate06_stoch.gif` — n=4 at TH_GATE=0.6 (seed 8 opens; others wander).
+- `gifs/gc_sharp3_archfix_stoch.gif` — architecture fix, mutation targeting.
+- `gifs/gc_anneal_gate095_stoch.gif` — n=4 at 0.95.
+- `gifs/gc_anneal_n8_gate095_stoch.gif` — n=8 at 0.95 (agents build strength, rare push).
 
 ---
 
-## 6. Key numbers (funnel, eval @ TH_GATE=0.95)
+## 6. Bugs found and fixed this session
 
-| Run | Agents | Anneal | Gates / 5 seeds | max_strength |
-|-----|--------|--------|-----------------|--------------|
-| gc_anneal    | 4 | 0.6→0.95 | 2 | 0.51 |
-| gc_anneal2   | 4 | 0.6→0.95 (slow) | 0 | 0.51 |
-| **gc_anneal_n8** | **8** | **0.6→0.95** | **7** | **0.93–0.98** |
-
-At TH_GATE=0.6 (easy bar), gates open on 3–4/5 seeds (gc_curric).
+1. **eval_metrics gate counter** — counted GATE(6)→any-non-6 as an opening. Fixed to
+   per-cell 6→0 (real opening only). Verified by unit test (7 cases).
+2. **eval_metrics `ag.tr.strength`** — raw cpp_sim Agent has no `.tr`; crashed on
+   gate-adjacent seeds. Fixed via `dump_agents()`.
+3. **Funnel launcher** — passed `--food_seed` not `--seeds`; all "seeds" used default
+   12345. Fixed (use `--seeds` for env seed variation).
+4. **init_ckpt resume** — requires identical agent count (n=4 ckpt → n=8 model crashes).
+   Train from scratch at the target n.
 
 ---
 
-## 7. What remains (engineering, not mystery)
+## 7. Repo
 
-- **Seed 8 got 0 gates** in the n=8 funnel — emergence is frequent but not 100% reliable
-  per fixed seed (stochastic). More training updates or a slower anneal at n=8 would
-  tighten it.
-- **Cross-seed robustness** at n=4 is poor (the gate is rare there). n=8 is the answer.
-- The `init_ckpt` resume requires identical agent count — a limitation to fix if we want
-  to resume n=4 ckpts into n=8 runs (currently train from scratch at the target n).
-
-## 8. Repo / commits
-
-All changes committed on `main`. Notable: scour fixes (cpp/sim.cpp), `reward_preset='gc'`
-lever, needed-trait skip (model.py), runtime `gate_thresh` (cpp + env + train), gradual
-anneal schedule (train.py), eval_metrics bug fix, and the render.py `gate_thresh`
-passthrough. Full log in `docs/EXPERIMENTS.md`.
+All on `main`. Notable commits: scour fixes, `reward_preset='gc'`, needed-trait skip,
+runtime `gate_thresh`, gradual anneal schedule, eval_metrics fixes, render.py
+`gate_thresh` passthrough, GIFs. Full log: `docs/EXPERIMENTS.md`.
