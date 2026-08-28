@@ -45,8 +45,6 @@ emergence.
 
 ## 2. What was REAL and verified
 
-## 2. What was REAL and verified
-
 - **Sim bugs (9 scour fixes):** oracle + RL couldn't open the gate until fixed. Real.
 - **Credit assignment:** verified fine via --diag_train. Real.
 - **Exposure / G+C reward lever (`reward_preset='gc'`):** makes the gated-food chain learnable.
@@ -81,6 +79,27 @@ make reward params dynamic + adaptive controller (see `env.py` + `train.py` rewa
 Key: G+C turns the fully-sparse reward (harvest + one-shot gate_gain) into a dense,
 stage-by-stage shaping of the whole chain. But even maxed out, it does NOT close the final
 multi-agent coordination gap → see TRUE measurement (section 4).
+
+### Reward structure diagnosis (why coordination fails — adjacency-bound)
+
+The reward is **almost entirely adjacency-gated (binary Manhattan==1), not distance-gradient
+based** — confirmed in `cpp/sim.cpp`:
+- `eat_gain` (15): only when adjacent to harvestable food.
+- `trait_match_bonus` (0.4): only adjacent to the *matching* gated tile (HARD_NUT/TALL_FRUIT).
+- `gate_prox_bonus` (0.3): only adjacent to a GATE cell AND strength≥bar.
+- `gate_gain` (0.8): only on the single frame the gate opens.
+- The ONLY distance gradient is `food_pull` (PBRS, `nav_alpha` 0.10–0.25) toward the nearest
+  *regular food* (`nearest_food_dist`, sim.cpp:336). `nearest_gated_dist` (sim.cpp:365)
+  exists for diagnostics but feeds NO reward.
+
+Consequence: there is **no gradient pulling an agent toward a gate** (or toward gated food,
+or toward a teammate at a gate). `gate_prox_bonus` is a cliff — you get 0.3/step only once
+you're already adjacent AND strong, so it can't teach *approach + synchronize*. Agents learn
+to be strong (strength-building works, see n=8) but then **idle strong next to a gate** with
+no signal to time it with a teammate. That is exactly the wandering GIFs show. The gap is
+not PPO/VF/curriculum — it is a missing **distance-to-gate + teammate-co-location** shaping
+term. Proposed fix: `gate_approach_bonus` (decaying with dist to nearest gate, gated by own
+strength) + `sync_bonus` (rewards strong agents converging on the same gate within a radius).
 
 ## 3. What was BROKEN (and now fixed)
 

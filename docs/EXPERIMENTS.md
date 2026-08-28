@@ -624,3 +624,11 @@ real difficulty. Remaining engineering: dense gate_prox_bonus shaping (decouple 
 strength>=bar so it rewards strong+near-gate below 0.95), slower/longer anneal, or more agents
 (n=16). Not done.
 
+**ROOT CAUSE (reward structure, from cpp/sim.cpp):** the reward is almost entirely
+adjacency-gated (binary Manhattan==1): eat_gain, trait_match_bonus, gate_prox_bonus all fire
+only AT the cell; gate_gain only on the open frame. The ONLY distance gradient is food_pull
+toward REGULAR food — there is NO reward for approaching a gate, gated food, or a teammate
+at a gate. So agents learn to be strong (n=8 works) but idle strong next to a gate with no
+signal to synchronize the push. Missing terms: `gate_approach_bonus` (decay with dist to
+nearest gate, gated by own strength) + `sync_bonus` (strong agents co-located at a gate).
+
