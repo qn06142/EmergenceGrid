@@ -117,11 +117,21 @@ strength) + `sync_bonus` (rewards strong agents converging on the same gate with
 
 ## 4. TRUE measurement (corrected eval_metrics: per-cell 6->0, exclude agent-on-gate, real `--gate_thresh` arg)
 
-| Checkpoint | Bar | Agents | gate_opened | max_strength | gate_chain_possible |
-|------------|-----|--------|-------------|--------------|---------------------|
-| gc_curric  | 0.6 | 4 | **0** | 0.95 | True |
-| gc_anneal  | 0.95 | 4 | **0** | 0.77 | False |
-| gc_anneal_n8 | 0.95 | 8 | **0** | 0.98 | True |
+| Checkpoint | Bar | Agents | Reward preset | gate_opened | max_strength | gate_chain_possible |
+|------------|-----|--------|---------------|-------------|--------------|---------------------|
+| gc_curric  | 0.6 | 4 | gc        | **0** | 0.95 | True  |
+| gc_anneal  | 0.95 | 4 | gc        | **0** | 0.77 | False |
+| gc_anneal_n8 | 0.95 | 8 | gc        | **0** | 0.98 | True  |
+| gc_dense_n4 (300 upd) | 0.6 | 4 | gc_dense  | **0** | 0.79 | True  |
+| gc_dense_n4 (300 upd) | 0.95 | 4 | gc_dense  | **0** | 0.79 | False |
+
+Addendum: `gc_dense` (distance-based shaping: trait/gate_approach_bonus + sync_bonus) was
+implemented and trained (n=4, 300 updates, anneal 0.6→0.95). It **does not open the gate**
+either — but it raises individual-pipeline metrics vs `gc` (max_strength 0.77→0.79,
+`reached_gated/step` 0.10–0.15 up from baseline). So distance grading sharpens the individual
+stages (approach + strength-building) but **the simultaneity gap persists**: agents reach the
+gate strong but don't synchronize the two-agent push. The fix improves the gradient signal but
+doesn't close the core coordination problem in 300 updates @ n=4.
 
 5 env seeds × 400 steps each. The gate does NOT open at any bar. `gate_chain_possible=True`
 means max strength ≥ bar was reached at some point (gc_curric/n8 build strength and

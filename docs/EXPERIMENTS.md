@@ -632,3 +632,25 @@ at a gate. So agents learn to be strong (n=8 works) but idle strong next to a ga
 signal to synchronize the push. Missing terms: `gate_approach_bonus` (decay with dist to
 nearest gate, gated by own strength) + `sync_bonus` (strong agents co-located at a gate).
 
+## TEST: distance-reward lever (`gc_dense`, 300 real updates, n=4)
+
+Implemented the 3 distance terms in `cpp/sim.cpp` + `env.py` `gc_dense` preset (A/B-able
+via `--reward_preset gc | gc_dense`): `trait_approach_bonus` (1/(1+nearest_gated_dist) when
+trait matches), `gate_approach_bonus` ((strength/bar)/(1+nearest_gate_dist) for strong agents),
+`sync_bonus` (strong teammates co-locating at a gate within sync_radius). Trained n=4,
+grid=64, anneal 0.6→0.95, nupd=300. Checkpoint `gc_dense_n4_policy_final.pt` (450MB policy;
+opt save crashed on iostream flush, policy saved clean).
+
+**Evaluated with the corrected counter (per-cell 6→0, exclude agent-on-gate, real --gate_thresh):**
+- @0.6: `gate_opened = 0` (stable x3 runs), `max_strength = 0.79±0.18`, `gate_chain_possible=True`,
+  `reached_gated/step = 0.15`.
+- @0.95: `gate_opened = 0`, `max_strength = 0.79±0.16`, `EATEN gained_right = 1.0±2.0`.
+
+**Verdict: distance grading IMPROVES the individual pipeline (strength 0.77→0.79, gated-food
+approach up) but does NOT produce gate openings.** Agents still reach the gate strong but don't
+synchronize the two-agent push. The simultaneity gap is real and persists — the sync_bonus
+signal (co-location at the gate) is too weak / not enough to drive joint convergence within
+300 updates at n=4. Next: scale to n=8 + longer anneal + stronger sync_bonus; or accept that
+independent-agent PPO with per-step rewards structurally under-weights rare joint events.
+Checkpoint left on disk at `ckpts/gc_dense_n4/` (untracked; .gitignore) for inspection.
+
