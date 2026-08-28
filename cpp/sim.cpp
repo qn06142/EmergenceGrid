@@ -122,10 +122,25 @@ struct Sim {
         float wrong_trait_pen = 0.3f;    // C: -reward for mutating WRONG trait when
                                          //    adjacent to gated food (doesn't unlock it)
         float gate_prox_bonus = 0.0f;    // G: dense shaping for being STRONG (>=gate
-                                         //    threshold) AND adjacent to a GATE, so the
-                                         //    final "be strong at the gate" push is
-                                         //    reinforced every step instead of only the
-                                         //    one-shot gate_gain when it opens.
+                                         // threshold) AND adjacent to a GATE, so the
+                                         // final "be strong at the gate" push is
+                                         // reinforced every step instead of only the
+                                         // one-shot gate_gain when it opens.
+        // ---- distance-based dense shaping (Phase-2 "G+C dense" preset) ----
+        // Replaces cliff-at-adjacency rewards with smooth gradients so the policy gets
+        // credit for APPROACHING, not only for being exactly on the cell.
+        float trait_approach_bonus = 0.0f; // decay * (1 / (1+nearest_gated_dist)) when the
+                                          // agent's trait unlocks a gated tile (pulls it toward
+                                          // gated food it can actually eat, gradient to the door)
+        float gate_approach_bonus = 0.0f; // decay * (strength/gate_thresh) / (1+nearest_gate_dist)
+                                         // for strong agents near a gate (so convergence starts
+                                         // before adjacency; the old gate_prox_bonus cliff only
+                                         // fired at Manhattan==1 AND strength>=bar)
+        float sync_bonus = 0.0f;          // per-step bonus when a STRONG agent (>=gate_thresh)
+                                         // is within sync_radius of another strong agent that is
+                                         // itself within gate-proximity — rewards co-location at
+                                         // the gate, the real coordinated-push precondition
+        float sync_radius = 6.0f;         // Manhattan radius for the teammate co-location check
     };
     RewardParams rp;
     float step_frac = 0.0f;  // training progress in [0,1], set by Python each update
@@ -370,6 +385,16 @@ struct Sim {
                 int d = abs(xx-x) + abs(yy-y);
                 if (d < best) best = d;
             }
+        }
+        return best;
+    }
+
+    // nearest GATE cell Manhattan distance (gate_cells is sparse).
+    int nearest_gate_dist(int x, int y) const {
+        int best = 1e9;
+        for (auto &g: gate_cells){
+            int d = abs(g[0]-x) + abs(g[1]-y);
+            if (d < best) best = d;
         }
         return best;
     }
@@ -626,6 +651,10 @@ struct Sim {
             // applying the trait change -- a latent bug.)
             // is added to the agent's own reward after PBRS).
         }
+        // Per-agent reward accumulator; sync_bonus also credits a TEammate, so buffer those
+        // credits separately and fold them in after the per-agent loop (otherwise a teammate's
+        // sync_rew is overwritten by rew[b.idx]=r when the loop reaches agent b).
+        std::vector<float> sync_rew(n, 0.0f);
         for (auto &a:agents){
             if (!a.alive){ done[a.idx]=true; continue; }
             float r = 0.0f;
@@ -677,6 +706,13 @@ struct Sim {
                     if (t==TALL_FRUIT && a.tr.can_tall()) { r += rp.trait_match_bonus; break; }
                 }
             }
+            // D: distance-based trait-approach shaping. If the agent's trait unlocks a
+            // gated tile somewhere, pay a decaying reward as it gets closer -> continuous
+            // gradient toward the eatable gated food (not a cliff at adjacency=1).
+            if (rp.trait_approach_bonus != 0.0f && (a.tr.can_hard() || a.tr.can_tall())) {
+                int gd = nearest_gated_dist(a.x, a.y);
+                if (gd < (int)(1e9)) r += rp.trait_approach_bonus / (1.0f + (float)gd);
+            }
             bool adj = adjacent_harvestable(a);
             // gated-food adjacency (for the pipeline funnel) -- computed once here
             bool adj_gated = false, adj_gated_unlock = false;
@@ -697,6 +733,35 @@ struct Sim {
                 for (int dx=-1;dx<=1;dx++) for (int dy=-1;dy<=1;dy++){
                     int nx=a.x+dx, ny=a.y+dy; if (nx<0||ny<0||nx>=W||ny>=H) continue;
                     if (grid[idx(nx,ny)]==GATE) { r += rp.gate_prox_bonus; break; }
+                }
+            }
+            // D: distance-based gate-approach shaping. STRONG agents (strength>=bar) get a
+            // decaying bonus as they approach a gate -- a continuous gradient toward the
+            // gate BEFORE adjacency, so convergence starts early (the old gate_prox_bonus
+            // cliff only fired at Manhattan==1). strength is normalized by the bar so the
+            // bonus grows with how close to opening-strength the agent is.
+            if (rp.gate_approach_bonus != 0.0f && a.tr.strength >= gate_thresh) {
+                int gd = nearest_gate_dist(a.x, a.y);
+                if (gd < (int)(1e9)) {
+                    float w = a.tr.strength / gate_thresh;        // >=1 when strong enough to open
+                    r += rp.gate_approach_bonus * w / (1.0f + (float)gd);
+                }
+            }
+            // D: sync bonus -- reward a STRONG agent co-locating (within sync_radius) near
+            // a gate with another STRONG agent. This is the explicit coordinated-push signal:
+            // the gate needs TWO strong pushers, so pay for being strong AND near a teammate
+            // who is also strong and gate-proximate. Closes the simultaneity gap.
+            if (rp.sync_bonus != 0.0f && a.tr.strength >= gate_thresh
+                && nearest_gate_dist(a.x, a.y) <= (int)rp.sync_radius) {
+                for (auto &b: agents) {
+                    if (!b.alive || b.idx == a.idx) continue;
+                    if (b.tr.strength < gate_thresh) continue;
+                    if (abs(b.x - a.x) + abs(b.y - a.y) <= (int)rp.sync_radius) {
+                        // teammate b is strong AND within sync_radius of a -> reward BOTH
+                        r += rp.sync_bonus;
+                        sync_rew[b.idx] += rp.sync_bonus;
+                        break;
+                    }
                 }
             }
             if (act == 5) {
@@ -774,6 +839,8 @@ struct Sim {
             if (a.energy <= 0) { a.energy = 0; a.alive = false; done[a.idx] = true; r -= DEATH_PEN; occ[idx(a.x, a.y)] = 0; diag.dead++; }
             rew[a.idx] = r;
         }
+        // fold deferred sync_bonus credits (teammate co-location) into the reward vector.
+        for (int i=0; i<n; i++) rew[i] += sync_rew[i];
         resolve_hazards(rew,done);
         resolve_predators(rew,done);
         resolve_gates(rew);
@@ -948,7 +1015,10 @@ PYBIND11_MODULE(cpp_sim, m) {
                                       float eat_gain_regular, float invalid_harvest_pen,
                                       float trait_mut_pen, float trait_mut_pen_gated,
                                       float gate_gain, float trait_match_bonus,
-                                      float mutate_gated_gain, float wrong_trait_pen){
+                                      float mutate_gated_gain, float wrong_trait_pen,
+                                      float trait_approach_bonus=0.0f,
+                                      float gate_approach_bonus=0.0f,
+                                      float sync_bonus=0.0f, float sync_radius=6.0f){
             s.rp.food_pull = food_pull;
             s.rp.nav_alpha = nav_alpha;
             s.rp.eat_gain = eat_gain;
@@ -960,6 +1030,10 @@ PYBIND11_MODULE(cpp_sim, m) {
             s.rp.trait_match_bonus = trait_match_bonus;
             s.rp.mutate_gated_gain = mutate_gated_gain;
             s.rp.wrong_trait_pen = wrong_trait_pen;
+            s.rp.trait_approach_bonus = trait_approach_bonus;
+            s.rp.gate_approach_bonus = gate_approach_bonus;
+            s.rp.sync_bonus = sync_bonus;
+            s.rp.sync_radius = sync_radius;
         })
         .def("set_gate_prox_bonus", [](Sim&s, float v){ s.rp.gate_prox_bonus = v; })
         .def("set_step_frac", [](Sim&s,float f){ s.step_frac = f; })

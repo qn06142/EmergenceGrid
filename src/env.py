@@ -131,6 +131,14 @@ class EmergenceGrid:
             'default': {},
             'gc': dict(trait_match_bonus=0.4, mutate_gated_gain=8.0,
                        wrong_trait_pen=2.5, gate_prox_bonus=0.3),
+            # 'gc_dense' = G+C with DISTANCE-based shaping (replaces adjacency-cliffs with
+            # continuous gradients toward gated food / gates + a sync bonus for strong
+            # teammates converging at the same gate). A/B-able lever for the coord gap.
+            'gc_dense': dict(trait_match_bonus=0.4, mutate_gated_gain=8.0,
+                             wrong_trait_pen=2.5, gate_prox_bonus=0.3,
+                             trait_approach_bonus=0.15,
+                             gate_approach_bonus=0.2,
+                             sync_bonus=0.3, sync_radius=6.0),
         }
         if reward_preset not in _PRESETS:
             raise ValueError(f"unknown reward_preset={reward_preset!r}")
@@ -141,7 +149,10 @@ class EmergenceGrid:
             gate_gain=0.8, trait_match_bonus=0.0,
             mutate_gated_gain=1.5,     # C: +reward for mutating the RIGHT trait near gated
             wrong_trait_pen=0.3,       # C: -reward for mutating WRONG trait near gated
-            gate_prox_bonus=0.0)       # G: dense + for strong(>=gate thr) & adjacent to gate
+            gate_prox_bonus=0.0,       # G: dense + for strong(>=gate thr) & adjacent to gate
+            trait_approach_bonus=0.0,  # D: dist-decay toward eatable gated food (when trait matches)
+            gate_approach_bonus=0.0,   # D: dist-decay toward gate for strong agents (strength/bar)
+            sync_bonus=0.0, sync_radius=6.0)  # D: reward strong teammates co-locating at a gate
         self.reward_params.update(_PRESETS[reward_preset])
         self._apply_reward_params()
 
@@ -172,7 +183,9 @@ class EmergenceGrid:
             rp['food_pull'], rp['nav_alpha'], rp['eat_gain'], rp['eat_gain_regular'],
             rp['invalid_harvest_pen'], rp['trait_mut_pen'],
             rp['trait_mut_pen_gated'], rp['gate_gain'], rp['trait_match_bonus'],
-            rp['mutate_gated_gain'], rp['wrong_trait_pen'])
+            rp['mutate_gated_gain'], rp['wrong_trait_pen'],
+            rp['trait_approach_bonus'], rp['gate_approach_bonus'],
+            rp['sync_bonus'], rp['sync_radius'])
         self._sim.set_gate_prox_bonus(rp['gate_prox_bonus'])
         self._sim.set_step_frac(getattr(self, 'step_frac', 0.0))
 
