@@ -39,25 +39,54 @@ emergence.
 
 ## 2. What was REAL and verified
 
-- **Sim bugs (9 scour fixes):** oracle+RL couldn't open gate until fixed. Real.
+## 2. What was REAL and verified
+
+- **Sim bugs (9 scour fixes):** oracle + RL couldn't open the gate until fixed. Real.
 - **Credit assignment:** verified fine via --diag_train. Real.
-- **Exposure / G+C reward lever (`reward_preset='gc'`):** makes gate-task gradient learnable.
+- **Exposure / G+C reward lever (`reward_preset='gc'`):** makes the gated-food chain learnable.
 - **Reward magnitude:** non-monotonic ceiling (~0.64). Real finding.
 - **Architecture fix (needed-trait skip):** wrong_trait_mut_rate 0.97→0.42. Real win.
-- **Gate curriculum (runtime TH_GATE):** lowered bar is settable; at 0.6 agents DO build
-  strength and mutate — but the gate still doesn't open (corrected count = 0).
 - **More agents (n=8):** fixed the strength-building (agents reach 0.91–1.00 vs 0.51 for n=4
   @0.95). Real win — but didn't produce gate openings.
+- **Gate curriculum (runtime `gate_thresh`):** bar 0.95 default; lowered to 0.6 to ease
+  coordination; anneal schedule 0.6→0.95 via `gate_thresh_schedule` + `env.set_gate_threshold()`
+  + `--gate_thresh_end` / `--gate_thresh_mode` argparse (was compile-time TH_GATE=95).
+
+### G+C reward wiring (precise, from source)
+
+`reward_preset='gc'` flips three shaping terms ON (see `env.py:132-133`, sim cpp struct at
+`cpp/sim.cpp:112-129`, applied via `set_reward_params(...)` + `set_gate_prox_bonus(...)`):
+
+| Term | Field | default → gc | fires (sim.cpp) | purpose |
+|------|-------|:------------:|---|---|
+| **C1** trait-match bonus | `trait_match_bonus` | 0.0 → **0.4** | :665-679 when agent with `can_hard()`/`can_tall()` adj to matching HARD_NUT/TALL_FRUIT | dense signal for "right trait + at the food it unlocks" — teaches stay-eat vs mutate-wander |
+| **C2** right-trait mutate gain | `mutate_gated_gain` | 1.5 → **8.0** | :716-729 mutate near gated food newly unlocks it (`adj_gated_unlock_before→now`) | bridges the sparse one-shot gate reward; the mutate→eat credit step |
+| **C3** wrong-trait penalty | `wrong_trait_pen` | 0.3 → **2.5** | :730-733 mutate near gated food but still can't eat | teaches mutating the CORRECT trait (str vs reach) — drove wrong_trait 0.97→0.42 |
+| **G** gate-prox bonus | `gate_prox_bonus` | 0.0 → **0.3** | :689-701 every step `strength ≥ gate_thresh` AND adjacent to a GATE cell | steady gradient for "strong at the gate" instead of only the one-shot gate_gain |
+| gate_gain (one-shot) | `gate_gain` | 0.8 (unchanged) | :525-527 in `resolve_gates()` when combined pusher strength ≥ gate_thresh | TRUE emergence reward; fires once, on opening frame — too sparse alone |
+
+Per-step reward accumulation per agent (sim.cpp `step`): PBRS food_pull(Δdist closer-to-food)
++ **trait_match_bonus** if adj eatable gated tile + **gate_prox_bonus** if strong+adj GATE;
+on `harvest`: +eat_gain (gated only if unlocked) else −invalid_harvest_pen; on `mutate`:
+−trait_mut_pen then +mutate_gated_gain (if newly unlocked) else −wrong_trait_pen.
+`gate_threshold` (0.95 default, settable) is the combined-pusher bar; `set_reward_params`/`set_step_frac`
+make reward params dynamic + adaptive controller (see `env.py` + `train.py` reward loop).
+
+Key: G+C turns the fully-sparse reward (harvest + one-shot gate_gain) into a dense,
+stage-by-stage shaping of the whole chain. But even maxed out, it does NOT close the final
+multi-agent coordination gap → see TRUE measurement (section 4).
 
 ## 3. What was BROKEN (and now fixed)
 
-- **eval_metrics gate counter** — counted GATE(6)→any-non-6. Fixed to per-cell 6→0 AND
-  excludes agent-occupied cells (verified by unit test + live run → 0).
-- **eval_metrics `ag.tr.strength`** — raw cpp_sim Agent has no `.tr`; crashed on gate-adjacent
-  seeds. Fixed via `dump_agents()`.
-- **Funnel launcher** — passed `--food_seed` not `--seeds`. Fixed.
-- **init_ckpt resume** — requires identical agent count (n=4 ckpt → n=8 model crashes).
-  Train from scratch at target n.
+- **eval_metrics gate counter** — counted any GATE(6)→non-6 change (incl. an agent STANDING
+  on a gate cell, which the sim writes as 0). Fixed to per-cell GATE(6)→EMPTY(0) AND excludes
+  agent-occupied cells (verified by unit test + live run → 0). [the root cause of "16/17 gates"]
+- **eval_metrics `ag.tr.strength`** — raw `cpp_sim.Agent` has no `.tr`; crashed on gate-adjacent
+  seeds, silently dropping them. Fixed via `env._sim.dump_agents()` (returns dicts with `strength`).
+- **Funnel launcher** — passed `--food_seed` but NOT `--seeds`, so eval_metrics ran its default env
+  seed for every "seed". Fixed to pass `--seeds` (comma string) for real per-seed variation.
+- **`init_ckpt` resume** — requires identical agent count (n=4 ckpt → n=8 model crashes on size
+  mismatch). Train from scratch at the target n.
 
 ---
 
