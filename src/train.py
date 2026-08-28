@@ -586,11 +586,15 @@ if __name__ == '__main__':
                         'MUTATE near an unlocked gate?) from CREDIT (is mean advantage on '
                         'that action positive?).')
     ap.add_argument('--reward_preset', type=str, default='default',
-                   choices=['default', 'gc'],
+                   choices=['default', 'gc', 'gc_dense'],
                    help="Reward-density lever. 'gc' = G+C preset: raises trait_match_bonus "
                         "(bridge mutate->eat), mutate_gated_gain, sharpens wrong_trait_pen, "
                         "and adds dense gate_prox_bonus for strong+adjacent-to-gate. "
-                        "Diagnosed via --diag_train as the credit-sparse bottleneck.")
+                        "Diagnosed via --diag_train as the credit-sparse bottleneck. "
+                        "'gc_dense' = gc + DISTANCE-based shaping (decaying gradients toward "
+                        "gated food/gates for strong agents + sync bonus for strong teammates "
+                        "co-locating at a gate) -- replaces adjacency cliffs with smooth "
+                        "approach gradients. A/B-able lever, defaults untouched.")
     ap.add_argument('--gate_thresh', type=float, default=0.95,
                    help="Gate opens at combined pusher strength >= this. Curriculum: lower (e.g. 0.6) to ease multi-agent coordination, then ramp up.")
     ap.add_argument('--gate_thresh_end', type=float, default=0.95,
