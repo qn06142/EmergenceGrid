@@ -598,30 +598,29 @@ were MEASUREMENT BUGS, not emergence:
       Fixed to per-cell GATE(6)->EMPTY(0) only (verified by unit test).
   (b) the funnel launcher passed --food_seed but NOT --seeds, so eval_metrics used the
       default env seed 12345 for every "seed" -- the per-seed numbers were meaningless.
-  (c) EVEN AFTER (a)+(b): the corrected counter (per-cell GATE(6)->EMPTY(0), excluding
-      agent-occupied cells) shows emergence is SEED- AND FOOD_SEED-DEPENDENT to the point of
-      being non-reproducible:
-        gc_curric    @0.6 : seed 8 opens the gate repeatedly (~16x with matching food_seed),
-                              seeds 5,6,7,9 = 0. Varies run-to-run with food_seed.
-        gc_anneal_n8 @0.95: 0 across all seeds.
-      So emergence is REAL but FRAGILE/singular (one seed at the easy bar, food_seed-matched)
-      and ABSENT at 0.95. Direct probe: seed8=16 real 6->0 (agent-free) with food_seed 8,
-      but seed8 with food_seed 5 = 0. The earlier "3/5"/"7"/"16"/"17" were artifacts; the
-      TRUE picture: capability exists in policy space (seed 8 proves it) but is NOT reliably
-      learned across seeds/difficulty.
-HONEST READ: the coordinated-push emergence is demonstrable on a SPECIFIC seed (8) at
-TH_GATE=0.6 with the right food placement, but does not generalize (other seeds 0, and 0 at
-0.95). It is a fragile coincidence, not a robust learned behavior. The arc is NOT complete.
+  (c) EVEN AFTER (a)+(b) and a NEW eval fix (added `--gate_thresh` arg: before this, eval
+      ran at the 0.95 default even for gc_curric, so the "seed8=16" was at the wrong bar AND
+      from the broken counter): corrected eval_metrics (per-cell 6->0, exclude agent-on-gate),
+      real `--gate_thresh`, 5 env seeds x 400 steps:
+        gc_curric    @0.6 (n=4): gate_opened = 0   (max_strength 0.95, gate_chain_possible True)
+        gc_anneal_n8 @0.95 (n=8): gate_opened = 0   (max_strength 0.98, gate_chain_possible True)
+        gc_anneal    @0.95 (n=4): gate_opened = 0   (max_strength 0.77, gate_chain_possible False)
+      So emergence does NOT occur at any bar with correct measurement. The earlier "seed 8 =
+      16" was ALSO an artifact. Agents build strength and approach gates (gate_chain_possible
+      True: strength >= bar is reached) but the gate never opens -- the simultaneous-push
+      coincidence is not learned.
+HONEST READ: emergence is NOT demonstrated (no longer even "seed-fragile"). All "gate
+opened" counts this session were measurement artifacts: broken counter (counted agent-on-gate
+6->0) + wrong eval bar (gc_curric ran at 0.95, not 0.6). The pipeline is sound; agents get
+strong and gate-adjacent but don't coordinate the push. The arc is NOT complete.
 
-**FINAL STATUS (arc NOT complete -- emergence NOT reliably achieved):** Corrected
-eval_metrics (per-cell 6->0, no agent-on-gate) shows emergence is FRAGILE/seed-specific:
-gc_curric @0.6 opens the gate on seed 8 with matching food_seed (~16x) but 0 on other seeds;
-gc_anneal_n8 @0.95 = 0. So the coordinated-push capability exists in policy space (seed 8
-proves it at the easy bar) but is NOT reliably learned across seeds, and is ABSENT at the
-real 0.95 difficulty. Agents build strength (max ~0.98) and mutate near gated food but the
-push doesn't generalize. Every "gate opened" count earlier this session was a measurement
-artifact; the TRUE result is singular/fragile emergence (seed 8 @0.6), not robust. Remaining
-engineering (not mystery): make the push reliable + transfer to 0.95 -- dense gate_prox_bonus
-shaping, decouple strength incentive from gate threshold, slower/longer anneal, or more agents
+**FINAL STATUS (arc NOT complete -- emergence NOT demonstrated):** Corrected
+eval_metrics (per-cell 6->0, exclude agent-on-gate, REAL `--gate_thresh` arg) shows 0 real
+gate openings at BOTH 0.6 (n=4) and 0.95 (n=4/n=8). Agents build strength (max ~0.98) and
+approach gates (gate_chain_possible True) but the gate never opens. Every "gate opened"
+count this session was a measurement artifact (broken counter + wrong eval bar + agent-on-gate
+6->0). The pipeline is sound but the core coordinated-push is NOT learned -- absent at the
+real difficulty. Remaining engineering: dense gate_prox_bonus shaping (decouple from
+strength>=bar so it rewards strong+near-gate below 0.95), slower/longer anneal, or more agents
 (n=16). Not done.
 

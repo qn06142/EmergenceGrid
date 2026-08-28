@@ -28,7 +28,7 @@ ACTION_NAMES = ["idle", "up", "right", "down", "left", "harvest", "share",
 def evaluate(ckpt, n=1, grid=64, steps=400, seeds=(12345,), greedy=False,
              curriculum=1, food_seed=0, food_seed_dist=1, food_density_div=50,
              food_regen_mode=2, gated_food=1, d_model=256, gru_hidden=256,
-             head_dim=256, harvest_bias=0.0, device=None):
+             head_dim=256, harvest_bias=0.0, device=None, gate_threshold=0.95):
     device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
     policy = AgentPolicyBatch(n, d_model=d_model, gru_hidden=gru_hidden,
                               head_dim=head_dim).to(device)
@@ -41,7 +41,8 @@ def evaluate(ckpt, n=1, grid=64, steps=400, seeds=(12345,), greedy=False,
                             curriculum=curriculum, food_seed=food_seed,
                             food_seed_dist=food_seed_dist, respawn=True,
                             food_density_div=food_density_div,
-                            food_regen_mode=food_regen_mode, gated_food=gated_food)
+                            food_regen_mode=food_regen_mode, gated_food=gated_food,
+                            gate_thresh=gate_threshold)
         obs = env.reset()
         hid = torch.zeros(n, 1, policy.gru_hidden, device=device)
         prev_inv = [a.inv for a in env.agents]
@@ -196,6 +197,8 @@ def main():
     ap.add_argument('--food_density_div', type=int, default=50)
     ap.add_argument('--food_regen_mode', type=int, default=2)
     ap.add_argument('--gated_food', type=int, default=1)
+    ap.add_argument('--gate_thresh', type=float, default=0.95,
+                    help='gate bar for eval (match checkpoint training bar: gc_curric=0.6)')
     ap.add_argument('--d_model', type=int, default=256)
     ap.add_argument('--gru_hidden', type=int, default=256)
     ap.add_argument('--head_dim', type=int, default=256)
@@ -207,7 +210,8 @@ def main():
                  food_density_div=args.food_density_div,
                  food_regen_mode=args.food_regen_mode, gated_food=args.gated_food,
                  d_model=args.d_model, gru_hidden=args.gru_hidden,
-                 head_dim=args.head_dim, harvest_bias=args.harvest_bias)
+                 head_dim=args.head_dim, harvest_bias=args.harvest_bias,
+                 gate_threshold=args.gate_thresh)
     p = lambda k: f"{R[k][0]:.4f} +/- {R[k][1]:.4f}"
     print(f"[eval] {args.ckpt}  seeds={R['n_seeds']} steps={args.steps} greedy={args.greedy}")
     print(f"  collect_rate (harv/step)   = {p('collect_rate')}")

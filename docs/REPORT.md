@@ -5,25 +5,31 @@
 The question: *can multi-agent emergence (coordinated, trait-gated, strength-gated gate-push)
 arise from RL in this sim?*
 
-**Honest answer: NO — not yet. The emergence does NOT occur.** Corrected measurement shows
-**0 real gate openings** at both TH_GATE=0.6 (n=4) and TH_GATE=0.95 (n=8), with the
-gated-food chain barely completed (EATEN|reached end-to-end ~0.0036 @0.95, ~0.025 @0.6).
-Agents build strength and mutate near gated food, but never coordinate the push that opens
-the gate. This matches the GIFs exactly: they harvest and wander, the gate never opens.
+**Honest answer: NO — not yet. The emergence does NOT occur.** Corrected measurement
+(per-cell GATE(6)→EMPTY(0), excluding agent-on-gate cells; with a real `--gate_thresh` eval
+bar) shows **0 real gate openings at TH_GATE=0.6 (n=4) AND 0.95 (n=8)**. Agents build
+strength (max ~1.0 at n=8, ~0.95 at n=4 @0.6) and mutate near gated food, but never
+coordinate the simultaneous push that opens the gate. This matches the GIFs exactly: they
+harvest and wander, the gate never opens.
 
-**CRITICAL: every "gate opened" claim this session was a MEASUREMENT ARTIFACT.** Three
-layers of bugs compounded:
+IMPORTANT: every "gate opened" / "3/5 gates" / "7 gates" / "seed 8 = 16" claim from earlier
+this session was a MEASUREMENT ARTIFACT — three compounding bugs: (1) gate counter counted
+any GATE(6)→non-6 (incl. an agent STANDING on a gate cell); (2) the funnel used the wrong
+seed param so all "seeds" were the default; (3) eval ran at 0.95 even for gc_curric (no
+`--gate_thresh` arg existed). All fixed & verified → 0.
+
 1. The gate counter counted ANY GATE(6)→non-6 transition (incl. an agent stepping onto a
    gate cell, or food regrowing on it) instead of GATE(6)→EMPTY(0) only.
 2. The funnel launcher passed `--food_seed` not `--seeds`, so all "seeds" used the default
    env seed 12345 — per-seed numbers were meaningless.
-3. Even after fixing (1)+(2), non-deterministic runs produced agents standing on gate cells
-   (sim writes 0 there), which still looked like 6→0 openings. The final fix excludes
-   agent-occupied cells. With that, count = 0.
+3. Even after fixing (1)+(2), the eval had NO `--gate_thresh` argument, so gc_curric was
+   always evaluated at the 0.95 default (not its trained 0.6 bar). Added the arg.
+4. Even after (3), agents standing on a gate cell make the sim write 0 there → false 6→0.
+   Final fix: exclude agent-occupied cells. With all fixes: count = 0 at every bar.
 
-The pipeline IS sound (sim clean, credit verified, exposure/arch/curriculum fixes real). The
-**core coordinated-push behavior is simply not learned**. That is the remaining, unsolved
-problem — an open engineering task, not a mystery, but genuinely NOT done.
+The pipeline IS sound (sim clean, credit verified, exposure/arch/curriculum fixes real).
+The **core coordinated-push behavior is simply not learned**. That is the remaining,
+unsolved problem — an open engineering task, not a mystery, but genuinely NOT done.
 
 ---
 
@@ -90,20 +96,20 @@ multi-agent coordination gap → see TRUE measurement (section 4).
 
 ---
 
-## 4. TRUE measurement (corrected eval_metrics, per-cell 6->0, exclude agent-on-gate, 5 seeds)
+## 4. TRUE measurement (corrected eval_metrics: per-cell 6->0, exclude agent-on-gate, real `--gate_thresh` arg)
 
-| Checkpoint | Bar | Agents | gate_opened | note |
-|------------|-----|--------|-------------|------|
-| gc_curric  | 0.6 | 4 | **seed-8-specific (~16 on seed 8 w/ matching food_seed; 0 on others)** | real but fragile |
-| gc_anneal_n8 | 0.95 | 8 | **0** | absent at real difficulty |
+| Checkpoint | Bar | Agents | gate_opened | max_strength | gate_chain_possible |
+|------------|-----|--------|-------------|--------------|---------------------|
+| gc_curric  | 0.6 | 4 | **0** | 0.95 | True |
+| gc_anneal  | 0.95 | 4 | **0** | 0.77 | False |
+| gc_anneal_n8 | 0.95 | 8 | **0** | 0.98 | True |
 
-max_strength 0.97–0.98 (agents build strength fine). wrong_trait_mut_rate ~0.74.
-EATEN|reached end-to-end ~0.025 @0.6, ~0.0036 @0.95.
+5 env seeds × 400 steps each. The gate does NOT open at any bar. `gate_chain_possible=True`
+means max strength ≥ bar was reached at some point (gc_curric/n8 build strength and
+approach gates), but the simultaneous multi-agent push never fires. EATEN|reached ~0.0036–0.025.
 
-So: the coordinated-push capability EXISTS (seed 8 @0.6 opens the gate repeatedly) but is
-SEED- and FOOD_SEED-DEPENDENT to the point of being non-reproducible across seeds, and does
-NOT transfer to 0.95. Emergence is demonstrated on one specific seed at the easy bar, not
-robust, not at the real difficulty.
+So: the gated-food STRENGTH-building chain (mutate→eat→strong) works (agents reach ~1.0).
+The coordinated TWO-agent push at the gate does NOT — it's the one piece that never fires.
 
 ---
 
