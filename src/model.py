@@ -117,6 +117,14 @@ class AgentPolicyBatch(nn.Module):
         _orth(self.critic_w, 1.0)
         self.critic_b = nn.Parameter(torch.zeros(N, 1))
 
+        # QMIX per-agent Q-head (independent weights per agent, like the V-head).
+        # Q_i(a) = einsum('ad,kd->ka', q_w[i], h_head) + q_b[i]; the mixer combines Q_i.
+        # Shares the GRU reasoning head + skip-connections with the actor, so policy
+        # and value are consistent (like forward_agent keeps actor/critic in sync).
+        self.q_w = nn.Parameter(torch.zeros(N, NACT, gru_hidden))
+        _orth(self.q_w, 1.0)
+        self.q_b = nn.Parameter(torch.zeros(N, NACT))
+
         # Goal skip-connection: the compact food vector (food_dx, food_dy, food_dist)
         # lives at the tail of `own` but was being drowned in the 1469-dim GRU input
         # (supervised "move toward food" stalled at 0.17 despite a linear probe on the
@@ -159,6 +167,13 @@ class AgentPolicyBatch(nn.Module):
             # Prior: prefer the mutate action that unlocks the adjacent gated tile.
             self.trait_w[:, 8, 0] = 1.0   # str+  (act8) when need_strplus
             self.trait_w[:, 10, 1] = 1.0  # reach+ (act10) when need_reachplus
+
+        # Q-head skip-connection params (zero-init; the QMIX value head gets no
+        # directional prior -- it learns from the centralized TD target). Kept as
+        # separate params (not reusing trait_w/food_w) so the Q-value stream stays
+        # independent of the actor's priors and the mixer is unbiased.
+        self.q_food_w = nn.Parameter(torch.zeros(N, NACT, 3))
+        self.q_trait_w = nn.Parameter(torch.zeros(N, NACT, 2))
 
     def _encode_grid(self, spat_big: torch.Tensor) -> torch.Tensor:
         """(K, H*W, SPAT_C) -> (K, d_model*SPATIAL_POOL^2) via no-pool dilated CNN +
@@ -239,6 +254,74 @@ class AgentPolicyBatch(nn.Module):
             logits = logits.masked_fill(~action_mask, -float('inf'))
         return logits, value.reshape(NK, 1), h_new
 
+    def forward_q(
+        self,
+        obs: torch.Tensor,
+        hidden: Optional[torch.Tensor] = None,
+        action_mask: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Per-agent Q-values (for QMIX). Mirrors `forward` but the critic head is a
+        Q-head (N, NACT, gru_hidden) -> (N, K, NACT) per-agent Q(s, a) for ALL actions,
+        reshaped to (NK, NACT) to match the agent-major obs layout.
+        Returns (q_values, h_new). Value head is NOT used here (QMIX needs Q, not V)."""
+        NK = obs.size(0)
+        K = NK // self.N
+        f, own = self._encode(obs)
+        x_in = torch.cat([f, own], dim=-1)
+        if hidden is None:
+            hidden = torch.zeros(self.N, K, self.gru_hidden, device=obs.device, dtype=obs.dtype)
+        h_new = self._gru_step(x_in, hidden)
+        h_head = self.head(h_new)
+        # Per-agent Q-head (like the V-head einsum, but over NACT actions).
+        q = torch.einsum('nad,nkd->nka', self.q_w, h_head) + self.q_b.unsqueeze(1)  # (N,K,NACT)
+        # Q skip-connection: a small projection of the food/trait own-vectors so the
+        # Q-value stream can see goal+trait info without drowning in the GRU (zero weight
+        # at init -> learns from the centralized TD target).
+        food = self._own(obs)[:, :, -3:]                          # (N, K, 3)
+        q = q + self.food_scale * torch.einsum('iac,ikc->ika', self.q_food_w, food)
+        trait = self._own(obs)[:, :, -5:-3]                        # (N, K, 2)
+        q = q + self.food_scale * torch.einsum('iac,ikc->ika', self.q_trait_w, trait)
+        q = q.reshape(NK, NACT)
+        if action_mask is not None:
+            q = q.masked_fill(~action_mask, -float('inf'))
+        return q, h_new
+
+    def forward_agent_q(
+        self, i: int, obs: torch.Tensor, hidden: Optional[torch.Tensor],
+        action_mask: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Agent-i slice of forward_q (keeps rollout fast + QMIX update consistent),
+        mirroring forward_agent. Returns (q_i, h_new) with q_i: (K, NACT)."""
+        K = obs.size(0)
+        spat = obs[:, :SPAT].view(K, GRID_H * GRID_W, SPAT_C)
+        grid_emb = self._encode_grid(spat)
+        f = grid_emb + self.grid_bias[i]                 # (K, d_model*P^2)
+        own = obs[:, SPAT:].view(K, OWN_DIM)             # (K, OWN)
+        x_in = torch.cat([f, own], dim=-1)
+        if hidden is None:
+            hidden = torch.zeros(1, K, self.gru_hidden, device=obs.device, dtype=obs.dtype)
+        Wih = self.q_w[i] if False else self.q_w[i]        # keep q_w[i] path explicit
+        # GRU step (same math as forward_agent for agent i):
+        Wih_full = self.gru_Wih[i]; Whh_full = self.gru_Whh[i]; b_full = self.gru_b[i]
+        h0 = hidden[0]                                     # (K, H)
+        gi = x_in @ Wih_full.t() + b_full                  # (K, 3H)
+        gh = h0 @ Whh_full.t()                             # (K, 3H)
+        i_r, i_i, i_n = gi.chunk(3, -1)
+        h_r, h_i, h_n = gh.chunk(3, -1)
+        r = torch.sigmoid(i_r + h_r)
+        z = torch.sigmoid(i_i + h_i)
+        n = torch.tanh(i_n + r * h_n)
+        h_new = (1 - z) * n + z * h0                       # (K, H)
+        h_head = self.head(h_new)
+        q = torch.einsum('ad,kd->ka', self.q_w[i], h_head) + self.q_b[i].unsqueeze(0)  # (K,NACT)
+        food = own[:, -3:]
+        q = q + self.food_scale * torch.einsum('ac,kc->ka', self.q_food_w[i], food)
+        trait = own[:, -5:-3]
+        q = q + self.food_scale * torch.einsum('ac,kc->ka', self.q_trait_w[i], trait)
+        if action_mask is not None:
+            q = q.masked_fill(~action_mask, -float('inf'))
+        return q, h_new.unsqueeze(0)
+
     def forward_agent(
         self,
         i: int,
@@ -283,6 +366,12 @@ class AgentPolicyBatch(nn.Module):
         if action_mask is not None:
             logits = logits.masked_fill(~action_mask, -float('inf'))
         return logits, value, h_new.unsqueeze(0)
+
+    def params_of_q(self, i: int):
+        return [
+            self.grid_bias[i], self.gru_Wih[i], self.gru_Whh[i], self.gru_b[i],
+            self.q_w[i], self.q_b[i], self.q_food_w[i], self.q_trait_w[i],
+        ]
 
     def params_of(self, i: int):
         return [

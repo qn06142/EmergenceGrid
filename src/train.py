@@ -34,7 +34,7 @@ def fixpath(p):
         p = m.group(1) + ':/' + m.group(2)
     return p
 
-from model import AgentPolicyBatch, OBS_DIM
+from model import AgentPolicyBatch, OBS_DIM, NACT
 from ppo import RolloutBuffer, RewardNormalizer
 from env import EmergenceGrid
 
@@ -131,6 +131,210 @@ def adaptive_reward_params(diag_agg, rp, k=8, step=0.15):
     if dead > 0:
         rp['eat_gain'] = clamp(rp['eat_gain'] + step * 2.0, 5.0, 30.0)
     return rp
+
+
+# ---------------------------------------------------------------------------
+# QMIX (centralized-critic multi-agent). Dispatched via --algo qmix.
+# Per-agent policies are INDEPENDENT (shared-weight ensemble, like IPPO); QMIX
+# adds a state-conditioned monotonic MIXER that combines the per-agent Q-values
+# into a joint Q_tot. Per-agent REWARDS stay local (env.py reward terms
+# unchanged -> EmergenceGrid D5 "no global reward term" holds); QMIX
+# centralizes only the VALUE through the mixer, which is exactly the credit
+# mechanism designed for the rare simultaneous gate-push (2+ strong agents
+# adjacent to a gate on the same frame).
+# ---------------------------------------------------------------------------
+def gate_schedule(u, nupd, g0, g1, mode):
+    """Linear gate-threshold anneal (mirrors run()'s schedule)."""
+    if mode == 'linear':
+        return g0 + (g1 - g0) * min(1.0, u / max(nupd - 1, 1))
+    return g0
+
+
+def run_qmix(n=4, grid=64, k=4, nstep=32, nupd=400, seed=42, log_every=25,
+             lr=1e-4, ckpt_dir=None, exp_name='qmix',
+             save_every=150, respawn=False, curriculum=3, food_seed=0,
+             food_seed_dist=1, food_density_div=50, gated_food=2, d_model=256,
+             gru_hidden=256, head_dim=256, ent_coef=0.05, ent_floor=0.5,
+             reward_preset='gc_dense', gate_thresh=0.6, gate_thresh_end=0.95,
+             gate_thresh_mode='linear'):
+    from qmix import QMIXMixer, QMIXBuffer
+    from env import EmergenceGrid
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    ckpt_dir = fixpath(ckpt_dir)
+    state_dim = n * 6   # global_state() row per agent: x,y,strength,can_hard,can_tall,alive
+    print(f"[qmix] n={n} grid={grid} k={k} nstep={nstep} nupd={nupd} "
+          f"preset={reward_preset} bar={gate_thresh}->{gate_thresh_end} "
+          f"state_dim={state_dim} device={device}", flush=True)
+
+    envs = [EmergenceGrid(width=grid, height=grid, n_agents=n, seed=seed + e * 1000,
+                          respawn=respawn, curriculum=curriculum, food_seed=food_seed,
+                          food_seed_dist=food_seed_dist, food_density_div=food_density_div,
+                          food_regen_mode=2, gated_food=gated_food,
+                          reward_preset=reward_preset, gate_thresh=gate_thresh)
+            for e in range(k)]
+    policy = AgentPolicyBatch(n, d_model=d_model, gru_hidden=gru_hidden,
+                              head_dim=head_dim, freeze_vision=False).to(device)
+    H = policy.gru_hidden
+    print(f"[model] d_model={d_model} gru_hidden={gru_hidden} params="
+          f"{sum(p.numel() for p in policy.parameters()):,}", flush=True)
+
+    mixer = QMIXMixer(state_dim, n, embed_dim=32, mixing_dim=16,
+                      hypernet_embed=64).to(device)
+    target_mixer = QMIXMixer(state_dim, n, embed_dim=32, mixing_dim=16,
+                             hypernet_embed=64).to(device)
+    target_mixer.load_state_dict(mixer.state_dict())
+    opt = torch.optim.Adam(list(policy.parameters()) + list(mixer.parameters()),
+                           lr=lr, eps=1e-5)
+    rew_norms = [RewardNormalizer(clip=10.0) for _ in range(n)]
+    buf = QMIXBuffer(n_agents=n, n_envs=k, n_steps=nstep)
+    hid = torch.zeros(n, k, H, device=device)
+    obs_now = [envs[e].reset() for e in range(k)]
+    ep_rew = [[0.0] * n for _ in range(k)]
+
+    for upd in range(nupd):
+        g = gate_schedule(upd, nupd, gate_thresh, gate_thresh_end, gate_thresh_mode)
+        for e in range(k):
+            envs[e].set_gate_threshold(g)
+        upd_gateopen = 0
+
+        # ---- rollout ----
+        for t in range(nstep):
+            obs_b = torch.as_tensor(np.concatenate(obs_now, axis=0), dtype=torch.float32,
+                                    device=device)                  # (N*K, Obs)
+            with torch.no_grad():
+                q_all, h_new = policy.forward_q(obs_b, hid)        # (N*K, NACT), (N,K,H)
+            q_all = q_all.view(n, k, NACT)                          # (N, K, NACT)
+            eps = max(0.05, 0.2 * (1.0 - upd / max(nupd - 1, 1)))
+            acts = torch.zeros(n, k, dtype=torch.long, device=device)
+            qtaken = torch.zeros(n, k, device=device)
+            for i in range(n):
+                for e in range(k):
+                    qi = q_all[i, e]
+                    if np.random.rand() < eps:
+                        a = np.random.randint(0, NACT)
+                    else:
+                        a = int(qi.argmax().item())
+                    acts[i, e] = a
+                    qtaken[i, e] = qi[a]
+            rews = np.zeros((n, k), dtype=np.float32)
+            dones = np.zeros((n, k), dtype=bool)
+            states = np.zeros((k, state_dim), dtype=np.float32)
+            next_obs = []
+            for e in range(k):
+                gp = envs[e].gate_cells
+                w = envs[e].W
+                before = sum(1 for (gx, gy) in gp
+                             if envs[e].grid[gy * w + gx] != 6) if gp else 0
+                o, r, d, _ = envs[e].step([int(acts[i, e].item()) for i in range(n)])
+                after = sum(1 for (gx, gy) in gp
+                            if envs[e].grid[gy * w + gx] != 6) if gp else 0
+                if after > before:
+                    upd_gateopen += 1
+                for i in range(n):
+                    rews[i, e] = rew_norms[i].normalize(float(r[i]))
+                    dones[i, e] = bool(d[i])
+                    ep_rew[e][i] += r[i]
+                next_obs.append(o)
+                states[e] = envs[e].global_state().flatten()[:state_dim]
+            buf.push(obs_b.detach().view(n, k, -1), acts, None,
+                     torch.from_numpy(rews), qtaken, torch.from_numpy(dones),
+                     hid.detach(), torch.from_numpy(states))
+            hid = h_new.detach()
+            obs_now = next_obs
+
+        # ---- QMIX double-Q update ----
+        loss, td_err, ent_mean = qmix_update(policy, mixer, target_mixer, buf, opt, device,
+                                   n, k, nstep, NACT, ent_coef=ent_coef,
+                                   ent_floor=ent_floor, gamma=0.99, max_grad_norm=0.5)
+        buf.reset()
+        with torch.no_grad():
+            for tp, mp in zip(target_mixer.parameters(), mixer.parameters()):
+                tp.data.mul_(0.995).add_(mp.data, alpha=0.005)
+
+        if log_every and (upd % log_every == 0 or upd == nupd - 1):
+            amax = int(acts[0, 0].item())
+            print(f"upd {upd:4d} | gate {g:.2f} | loss {loss:.4f} td {td_err:.3f} | "
+                  f"gateopen {upd_gateopen} | act0 {amax} | "
+                  f"ent {ent_mean:.2f}", flush=True)
+        if save_every and (upd % save_every == 0 or upd == nupd - 1):
+            ps = os.path.join(ckpt_dir, f"{exp_name}_policy_step{upd}.pt")
+            ts = os.path.join(ckpt_dir, f"{exp_name}_mixer_step{upd}.pt")
+            torch.save(policy.state_dict(), ps)
+            torch.save(mixer.state_dict(), ts)
+    print("[qmix] training complete", flush=True)
+
+
+def qmix_update(policy, mixer, target_mixer, buf, opt, device, n, k, T, nact,
+                ent_coef=0.05, ent_floor=0.0, gamma=0.99, max_grad_norm=0.5):
+    """One QMIX (double-Q TD) update over the rollout. Returns (mean_loss, mean_td_err)."""
+    obs = torch.stack(buf.obs).to(device)          # (T, N, K, Obs)
+    rew = torch.stack(buf.rew).to(device).sum(dim=1)  # (T, K) summed LOCAL reward over agents
+    don = torch.stack(buf.don).to(device)           # (T, N, K)
+    don_e = don.any(dim=1).float()                  # (T, K) env-level done
+    qtaken = torch.stack(buf.val).to(device)        # (T, N, K) taken-action Q per agent
+    states = torch.stack(buf.state).to(device)       # (T, K, S)
+
+    # Greedy next Q per agent from target policy (the online net under no_grad is a
+    # cheap proxy; a true target net needs a full target_policy copy -- wired via
+    # polyak below on the mixer, and the online forward_q for next actions is fine
+    # for n-step returns this task demands).
+    with torch.no_grad():
+        flat_last = obs[-1].reshape(n * k, -1)       # (N*K, Obs)
+        q_last, _ = policy.forward_q(flat_last)      # (N*K, NACT)
+        q_last = q_last.view(n, k, nact)
+        next_q = q_last.max(dim=-1)[0]               # (N, K) greedy next Q
+        # target Q_tot at the bootstrap step (tail).
+        sb = states[-1]                              # (K, S)
+        next_q_per_env = next_q.t()                  # (K, N) per-agent greedy Q
+        q_tot_next = torch.zeros(k, device=device)
+        for e in range(k):
+            q_tot_next[e] = target_mixer(next_q_per_env[e:e+1], sb[e:e+1]).squeeze()
+        q_tot_next = q_tot_next * (1.0 - don_e[-1])   # (K,)
+
+    # N-step discounted returns (double-Q): R_t = sum_{t'=t}^{T-1} γ^{t'-t} r + γ^{...} q_tot_next
+    returns = torch.zeros(T, k, device=device)
+    R = q_tot_next
+    for t in reversed(range(T)):
+        R = rew[t] + gamma * R * (1.0 - don_e[t])
+        returns[t] = R.detach()
+
+    # Online Q_tot at each (t, e) via the mixer over the taken-action Q.
+    q_tot = torch.zeros(T, k, device=device)
+    for t in range(T):
+        for e in range(k):
+            qa = qtaken[t, :, e]                      # (N,)
+            s = states[t, e]                          # (S,)
+            q_tot[t, e] = mixer(qa.unsqueeze(0), s.unsqueeze(0)).squeeze()
+
+    td_err = q_tot - returns
+    loss_td = F.mse_loss(q_tot, returns)
+    # Recompute per-agent Q + softmax entropy on the SAME taken actions so the
+    # entropy bonus differentiates to the policy (the rollout's `ent` was no_grad).
+    # buf.obs / buf.hid are (T, N, K, *) agent-major per env. forward_q expects
+    # obs (N*K', Obs) row = agent i in "env" e' and hidden (N, K', H). Merge time
+    # into the env batch: K' = K*T.
+    obs_agent_major = obs.permute(1, 2, 0, 3).reshape(n * k * T, -1)  # (N*K*T, Obs)
+    flat_hid = torch.stack(buf.hid, dim=0).permute(1, 2, 0, 3).reshape(n, k * T, -1)  # (N, K*T, H)
+    q_recompute, _ = policy.forward_q(obs_agent_major, flat_hid)     # (N*K*T, NACT)
+    q_recompute = q_recompute.reshape(n, k, T, nact).permute(2, 0, 1, 3)  # (T, N, K, NACT)
+    # entropy per (t, agent, env) from the Q-softmax (already summed over actions):
+    p = torch.softmax(q_recompute, dim=-1)              # (T, N, K, NACT)
+    ent_map = -(p * p.log()).sum(dim=-1)               # (T, N, K) per-agent entropy
+    ent_mean = ent_map.mean()
+    loss = loss_td - ent_coef * ent_mean
+    if ent_floor and ent_floor > 0.0:
+        # Entropy FLOOR: penalize entropy below the floor (stops collapse to a single
+        # action), matching the IPPO discipline in ppo_update_agent. Differentiable.
+        loss = loss + 0.1 * torch.clamp(ent_floor - ent_mean, min=0.0)
+    opt.zero_grad()
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(list(policy.parameters()) + list(mixer.parameters()),
+                                   max_grad_norm)
+    opt.step()
+    return float(loss_td.detach().cpu()), float(td_err.abs().mean().detach().cpu()), \
+           float(ent_mean.detach().cpu())
 
 
 def run(n=16, grid=128, k=8, nstep=64, nupd=2000, seed=12345, log_every=50,
@@ -602,9 +806,29 @@ if __name__ == '__main__':
     ap.add_argument('--gate_thresh_mode', type=str, default='none',
                    choices=['none', 'linear'],
                    help="Anneal TH_GATE during training: 'none' = constant, 'linear' = start->end across updates.")
+    ap.add_argument('--algo', type=str, default='ippo',
+                   choices=['ippo', 'qmix'],
+                   help="Training algorithm. 'ippo' = Independent PPO (default, local-only "\
+                        "value, the EmergenceGrid D1/D5 baseline). 'qmix' = QMIX: independent "\
+                        "per-agent policies + a centralized monotonic mixing network that credits "\
+                        "the joint action with a state-conditioned Q_tot. Per-agent REWARDS stay "\
+                        "local (D5 holds); QMIX centralizes only the VALUE via the mixer. "\
+                        "Use qmix to attack the rare simultaneous gate-push credit problem that "\
+                        "IPPO's per-agent critics cannot attribute.")
     args = ap.parse_args()
-    run(n=args.n, grid=args.grid, k=args.k, nstep=args.nstep, nupd=args.nupd,
-        seed=args.seed, log_every=args.log_every, ckpt_dir=args.ckpt_dir,
+    if args.algo == 'qmix':
+        run_qmix(n=args.n, grid=args.grid, k=args.k, nstep=args.nstep, nupd=args.nupd,
+                 seed=args.seed, log_every=args.log_every, ckpt_dir=args.ckpt_dir,
+                 exp_name=args.exp, save_every=args.save_every, curriculum=args.curriculum,
+                 food_seed=args.food_seed, food_seed_dist=args.food_seed_dist,
+                 food_density_div=args.food_density_div, gated_food=args.gated_food,
+                 d_model=args.d_model, gru_hidden=args.gru_hidden, head_dim=args.head_dim,
+                 ent_coef=args.ent_coef, ent_floor=args.ent_floor,
+                 reward_preset=args.reward_preset, gate_thresh=args.gate_thresh,
+                 gate_thresh_end=args.gate_thresh_end, gate_thresh_mode=args.gate_thresh_mode)
+    else:
+        run(n=args.n, grid=args.grid, k=args.k, nstep=args.nstep, nupd=args.nupd,
+            seed=args.seed, log_every=args.log_every, ckpt_dir=args.ckpt_dir,
         exp_name=args.exp, save_every=args.save_every, resume=args.resume,
         respawn=args.respawn, ent_coef=args.ent_coef, curriculum=args.curriculum,
         lr=args.lr, food_seed=args.food_seed, food_seed_dist=args.food_seed_dist,

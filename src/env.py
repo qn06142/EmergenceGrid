@@ -246,6 +246,28 @@ class EmergenceGrid:
         ]
         self._food_dist = None
 
+    def global_state(self) -> np.ndarray:
+        """Centralized state for QMIX's mixing network (NOT a reward term -- D5 holds).
+        QMIX needs a state s conditioning the (monotonic) mixer so it can attribute the
+        shared step reward to the right agent-action profile. We build s from
+        dump_agents() (positions, strength, can_hard/can_tall, alive) -- pure
+        INFERRED state from the engine, no new group reward.
+
+        State = concat over agents of [x, y, strength, can_hard, can_tall, alive]
+        (6 floats/agent). Positions are NOT normalized by grid here (mixer sees raw
+        coords + the per-agent obs already encodes relative food/gate direction;
+        the absolute positions let the mixer distinguish "stacked at a gate" vs
+        "scattered" -- the spatial pattern that carries the gate-push credit)."""
+        da = self._sim.dump_agents()
+        s = []
+        for a in da:
+            s += [float(a['x']), float(a['y']),
+                  float(a['strength']),
+                  1.0 if a['can_hard'] else 0.0,
+                  1.0 if a['can_tall'] else 0.0,
+                  1.0 if a['alive'] else 0.0]
+        return np.array(s, dtype=np.float32).reshape(self.n_agents, -1)
+
     @property
     def food_dist(self) -> np.ndarray:
         if self._food_dist is None:
