@@ -654,3 +654,54 @@ signal (co-location at the gate) is too weak / not enough to drive joint converg
 independent-agent PPO with per-step rewards structurally under-weights rare joint events.
 Checkpoint left on disk at `ckpts/gc_dense_n4/` (untracked; .gitignore) for inspection.
 
+## TEST 3 — QMIX (centralized-critic MARL) [2026-08-29]
+
+User call: "explore other algorithms than PPO" + "local-only rewards aren't going to be
+enough". Implemented QMIX as `--algo qmix` (committed 3278506). Per-agent policies stay
+INDEPENDENT (shared-weight ensemble, like IPPO); QMIX adds a state-conditioned monotonic
+mixer (`src/qmix.py`) over per-agent Q-heads (`model.py: q_w/q_b` + `forward_q`). Per-agent
+REWARDS stay local (env.py unchanged) — QMIX centralizes only the VALUE via the mixer, which
+is exactly the credit mechanism designed for the rare simultaneous gate-push. So this is a
+legitimate algorithm swap, not a reward-term addition (EmergenceGrid D5 "no global reward
+term" still holds; the centralization is the mixer, not a reward).
+
+Implementation: `AgentPolicyBatch.forward_q` (per-agent Q(s,a) for all 13 actions), `env.global_state()`
+(x,y,strength,can_hard,can_tall,alive per agent from `dump_agents()` — inferred state, not a
+reward), `QMIXMixer` (hypernet, softplus-monotonic weights), `QMIXBuffer`, `run_qmix` (eps-greedy
+Q rollout, double-Q TD target via polyak target mixer, entropy-floor reg), `qmix_update`.
+
+Trained n=4, grid=64, k=2, nstep=32, anneal 0.6→0.95, gc_dense preset, nupd=400 (ran to ~upd 125
+before the local background proc was killed; re-runnable). Smoke-verified end-to-end on the real
+sim (forward_q, env.step, global_state, double-Q update, target-mixer polyak, checkpoint save all run).
+
+**Training curve (k=2, gc_dense):**
+- upd 0:   loss 320.5  td 15.99  gateopen 0  ent 2.56
+- upd 100: loss 0.005  td 0.054  gateopen 0  ent 2.56
+- upd 125: loss 0.003  td 0.035  gateopen 0  ent 2.56
+
+**DIAGNOSIS (the honest finding):**
+- The MIXER / value-learning WORKS: TD error collapses 15.99 → 0.035 (450x), loss -> 0.003.
+  The centralized state + monotonic mixer successfully fit the joint return. QMIX's credit
+  attribution mechanism is functioning.
+- BUT the POLICY (per-agent Q-heads) does NOT converge: entropy is pinned at 2.56 (= ln 13,
+  MAX) every single update. Q-values are near-uniform across all 13 actions, so argmax(Q) is
+  arbitrary noise and the behavior never focuses on gate-pushing. `gateopen = 0` throughout.
+
+**Root cause:** the reward is still LOCAL and SPARSE. The TD target `Q_tot ~= sum_i r_i` is
+~0 on most steps, and the taken-action Q (`qtaken`) gets the same return regardless of WHICH
+action was taken. So the Q-heads collapse to ~0 for all actions -> uniform softmax -> max entropy.
+QMIX centralizes the VALUE but cannot shape the POLICY when the REWARD gives no per-action
+signal. This is the same ceiling as IPPO/gc_dense, just reached via a different (correct) path:
+**centralizing value != centralizing reward. The policy needs a reward that distinguishes actions.**
+
+**Next lever (the one untested hypothesis):** add a DENSE JOINT-GATE reward that the mixer can
+propagate to the pushing agents' Q-heads -- i.e. weight the gate-open reward by simultaneous
+pusher count, OR add a per-step shaping term (strong+adjacent-to-gate+teammate-strong-there)
+that the Q-heads can learn from. That turns "reward credits the joint event" into "reward
+SHAPES the per-agent action toward the joint event" -- which is what QMIX's mixer is built to
+exploit but currently cannot, because the reward is flat. Without that, QMIX == IPPO on this task.
+
+Uncommitted: no new code this round (QMIX already committed at 3278506). Checkpoint `qmix_n4_*
+_step0.pt` on disk (untracked; .gitignore).
+
+
