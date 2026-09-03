@@ -704,4 +704,57 @@ exploit but currently cannot, because the reward is flat. Without that, QMIX == 
 Uncommitted: no new code this round (QMIX already committed at 3278506). Checkpoint `qmix_n4_*
 _step0.pt` on disk (untracked; .gitignore).
 
+## TEST 4 — QMIX: the structural deadlock [2026-08-29]
+
+Full QMIX implementation (commit 66773ee): replay buffer + double-Q TD + polyak target
+policy/mixer + dense joint-gate bonus + unconditional gate-nav bonus + entropy penalty.
+Trained n=4 k=1 nupd=50 and n=4 k=2 nupd=400 on gc_joint preset.
+
+**Result: ent pinned at 2.565 (= ln 13, MAX) the entire run. Q-heads never differentiate.**
+
+Training curve (k=1, gc_joint, representative):
+- upd 0:  td 0.867 ent 2.560 replay 32
+- upd 10: td 1.153 ent 2.560 replay 352
+- upd 25: td 1.821 ent 2.560 replay 832
+- upd 49: td 2.086 ent 2.560 replay 1600
+
+The mixer learns (td rises 0.87→2.09, meaning Q_tot tracks the returns), but the
+per-agent Q-heads stay uniform: Q-spread across the 13 actions = 0.03-0.06 at init AND
+after 50 updates. ent=2.565 means every action has identical Q, so argmax(Q) is arbitrary
+noise and the policy never focuses. gateopen=0 throughout.
+
+**Root cause (probed, not guessed):**
+1. The gate opens with a SINGLE strong agent adjacent to it (resolve_gates: s>=gate_thresh,
+   one strong pusher suffices). So this is NOT a coordination task — it's an individual
+   "become strong AND navigate to gate" task.
+2. Probed random-policy rollout (600 steps): gate_adj=15227 (agents ARE at gates 25×/step),
+   max_strength=927 (agents DO get strong), but gate_adj_strong=0 — NO agent is ever strong
+   AND at a gate simultaneously. The conjunction is ~0%.
+3. The dense rewards (gate_approach/prox/joint) all required strength>=bar, so they fired
+   in ~0% of transitions → Q-heads got no gradient → stayed uniform.
+4. Added gate_nav_bonus (UNCONDITIONAL: any agent near a gate) to decouple navigation from
+   strength → dense "go to gate" signal. STILL ent=2.565. The Q-heads do not differentiate
+   even with a dense reward.
+
+**The structural deadlock:** QMIX trains only the TAKEN action's Q via TD. With the reward
+being near-constant (small hunger/step penalties) across most transitions, every action's Q
+gets the same ~0 target → all actions stay identical → uniform policy → no action ever gets
+a distinctly higher Q to break the symmetry. Replay + dense reward + entropy penalty cannot
+fix this because the reward itself does not distinguish actions in the states the policy
+visits. The mixer can fit Q_tot≈Σr≈0 without the Q-heads ever needing to differentiate.
+
+**Honest conclusion:** QMIX (centralized value) does NOT crack the gate on this task. The
+failure mode is deeper than the algorithm — it's that the per-agent reward signal does not
+differentiate actions in the reachable state distribution, so the Q-heads have no gradient
+to break symmetry. This is the same ceiling as IPPO/gc_dense, reached via a correct QMIX path.
+
+**What would actually crack it (untested):** a reward that distinguishes actions WITHIN a
+single step in common states — e.g. a shaped term that pays for "move toward gate" vs "move
+away" on EVERY step (not gated on strength), so the Q-heads get an immediate per-action
+gradient. Or accept the empirical verdict: independent-agent + local reward (PPO or QMIX)
+structurally cannot learn the simultaneous strong-at-gate state on this task.
+
+Code committed at 66773ee (replay buffer, joint-gate, gate-nav, entropy penalty). No
+checkpoints tracked (gitignored).
+
 
