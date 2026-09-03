@@ -141,6 +141,24 @@ struct Sim {
                                          // itself within gate-proximity — rewards co-location at
                                          // the gate, the real coordinated-push precondition
         float sync_radius = 6.0f;         // Manhattan radius for the teammate co-location check
+        // ---- dense JOINT-GATE credit (the QMIX lever) ----
+        // The simultaneity problem: the gate opens only when >=gate_thresh combined
+        // strength is adjacent on the SAME step, but the one-shot gate_gain fires too
+        // late/sparsely to shape the per-agent Q-heads (QMIX diagnosis: ent pinned at
+        // max, Q-heads uniform). joint_gate_bonus pays EVERY STEP a strong agent is
+        // adjacent to a gate, scaled by (m-1) = number of OTHER strong pushers on that
+        // gate. This is dense + quadratic in simultaneity, so the mixer can propagate it
+        // into the pushing agents' Q-heads (unlike the flat local reward). Default 0
+        // (gc_joint preset enables it; untouched otherwise).
+        float joint_gate_bonus = 0.0f;
+        // ---- UNCONDITIONAL gate-navigation bonus (the missing half) ----
+        // gate_approach/prox/joint all REQUIRE strength>=bar, so they fire only when a
+        // strong agent is already at a gate -- a conjunction that (probed) occurs in ~0%
+        // of random steps (gate_adj_strong=0 even though gate_adj=25/step and max_str=927).
+        // That's why the Q-heads never get a gradient and stay uniform. gate_nav_bonus is
+        // paid to ANY agent merely for being near a gate, so the policy learns the
+        // navigation half DENSELY; once strong agents reliably go to gates the gate opens.
+        float gate_nav_bonus = 0.0f;
     };
     RewardParams rp;
     float step_frac = 0.0f;  // training progress in [0,1], set by Python each update
@@ -551,6 +569,27 @@ struct Sim {
             for (auto &g:gate_cells){ if (grid[idx(g[0],g[1])]==GATE) grid[idx(g[0],g[1])]=EMPTY; }
             for (int ai:pushers){ agents[ai].energy=std::min(E_MAX_F,agents[ai].energy+rp.gate_gain); rew[ai]+=rp.gate_gain; }
         }
+        // JOINT-GATE DENSE SHAPING (QMIX lever): every step, for each gate, count the
+        // strong (>=gate_thresh) pushers currently adjacent to it (m). Pay each strong
+        // pusher joint_gate_bonus*(m-1) -- 0 when alone, growing quadratically with how
+        // many OTHER strong agents co-locate at the same gate on the same frame. This is
+        // the dense simultaneity signal the per-agent Q-heads need (the one-shot gate_gain
+        // is too sparse to shape them). Paid whether or not the gate actually opens, so the
+        // coordinated approach state is continuously credited.
+        if (rp.joint_gate_bonus != 0.0f && !gate_cells.empty()) {
+            for (auto &g:gate_cells){
+                if (grid[idx(g[0],g[1])] != GATE) continue;   // only reward approach to a CLOSED gate
+                std::vector<int> strong;
+                for (auto &a:agents){ if (!a.alive) continue;
+                    if (a.tr.strength < gate_thresh) continue;
+                    if (abs(a.x-g[0])+abs(a.y-g[1])==1) strong.push_back(a.idx); }
+                int m = (int)strong.size();
+                if (m >= 2) {  // coordination requires >=2 strong pushers
+                    float jb = rp.joint_gate_bonus * (float)(m - 1);
+                    for (int ai:strong) rew[ai] += jb;
+                }
+            }
+        }
     }
     void regen_tiles() {
         auto rint=[&](int a,int b){ std::uniform_int_distribution<int> d(a,b); return d(rng); };
@@ -746,6 +785,14 @@ struct Sim {
                     float w = a.tr.strength / gate_thresh;        // >=1 when strong enough to open
                     r += rp.gate_approach_bonus * w / (1.0f + (float)gd);
                 }
+            }
+            // UNCONDITIONAL gate-navigation bonus: paid to ANY agent for being near a gate,
+            // regardless of strength. Decouples the navigation half from the (rare) strong
+            // conjunction so the policy gets a dense "go to gate" gradient. Once strong
+            // agents reliably navigate there, resolve_gates opens it (single strong pusher).
+            if (rp.gate_nav_bonus != 0.0f) {
+                int gd = nearest_gate_dist(a.x, a.y);
+                if (gd < (int)(1e9)) r += rp.gate_nav_bonus / (1.0f + (float)gd);
             }
             // D: sync bonus -- reward a STRONG agent co-locating (within sync_radius) near
             // a gate with another STRONG agent. This is the explicit coordinated-push signal:
@@ -1018,7 +1065,8 @@ PYBIND11_MODULE(cpp_sim, m) {
                                       float mutate_gated_gain, float wrong_trait_pen,
                                       float trait_approach_bonus=0.0f,
                                       float gate_approach_bonus=0.0f,
-                                      float sync_bonus=0.0f, float sync_radius=6.0f){
+                                      float sync_bonus=0.0f, float sync_radius=6.0f,
+                                      float joint_gate_bonus=0.0f, float gate_nav_bonus=0.0f){
             s.rp.food_pull = food_pull;
             s.rp.nav_alpha = nav_alpha;
             s.rp.eat_gain = eat_gain;
@@ -1034,6 +1082,8 @@ PYBIND11_MODULE(cpp_sim, m) {
             s.rp.gate_approach_bonus = gate_approach_bonus;
             s.rp.sync_bonus = sync_bonus;
             s.rp.sync_radius = sync_radius;
+            s.rp.joint_gate_bonus = joint_gate_bonus;
+            s.rp.gate_nav_bonus = gate_nav_bonus;
         })
         .def("set_gate_prox_bonus", [](Sim&s, float v){ s.rp.gate_prox_bonus = v; })
         .def("set_step_frac", [](Sim&s,float f){ s.step_frac = f; })

@@ -83,78 +83,110 @@ class QMIXMixer(nn.Module):
         return q_tot
 
 
-class QMIXBuffer:
-    """Rollout buffer for QMIX. Stores per-step: obs (N*K,...), acts (N,K),
-    logp (N,K), **local** rewards (N,K), vals (N,K), dones (N,K), hid (N,K,H),
-    and the centralized state (N or 1 per env-episode, derived from dump_agents).
+class ReplayBuffer:
+    """Experience replay for QMIX. Stores full transitions (s,a,r,s',done,state,state')
+    so the RARE rewarding joint-gate transitions get reused many times during training
+    -- without replay, online QMIX only trains the taken action's Q once and (with
+    uniform-random exploration) never differentiates the Q-heads (every action gets the
+    same ~0 target -> uniform policy -> ent pinned at max). Replay is what makes distal
+    rewards actually train the heads.
 
-    B = N*K (agent-major: row = agent i in env e at position e*N+i).
-    State is (K,) one centralized state per env (shared across agents in that env).
+    Stored per push: obs_t (N*K,OBS), acts_t (N,K), rews_t (N,K) [LOCAL, D5-compliant],
+    states_t (K,S), dones_t (N,K), obs_t1 (N*K,OBS), states_t1 (K,S), dones_t1 (N,K).
     """
-    def __init__(self, n_agents: int, n_envs: int, n_steps: int,
-                 gamma=0.99, lam=0.95):
-        self.n_agents = n_agents
-        self.n_envs = n_envs
-        self.n_steps = n_steps
-        self.gamma = gamma
-        self.lam = lam
-        self.reset()
+    def __init__(self, capacity=20000):
+        self.cap = capacity
+        self.obs = []; self.acts = []; self.rews = []
+        self.state = []; self.don = []
+        self.obs1 = []; self.state1 = []; self.don1 = []
 
-    def reset(self):
-        self.obs = []      # (N*K,) per step
-        self.acts = []     # (N,K)
-        self.logp = []     # (N,K)
-        self.rew = []      # (N,K) -- LOCAL per-agent rewards (D5 compliant)
-        self.val = []      # (N,K) -- per-agent Q at taken action
-        self.don = []      # (N,K)
-        self.hid = []      # (N,K,H)
-        self.state = []    # (K, state_dim) centralized state per env
+    def add_rollout(self, buf, obs_next, state_next, don_next):
+        """Append a whole rollout (dict with keys obs/acts/rews/state/don, each a list
+        of per-step tensors) as transitions, with the supplied next obs/state/done for
+        the final step."""
+        T = len(buf['obs'])
+        for t in range(T):
+            self.obs.append(buf['obs'][t]); self.acts.append(buf['acts'][t])
+            self.rews.append(buf['rews'][t]); self.state.append(buf['state'][t])
+            self.don.append(buf['don'][t])
+            if t + 1 < T:
+                self.obs1.append(buf['obs'][t + 1]); self.state1.append(buf['state'][t + 1])
+                self.don1.append(buf['don'][t + 1])
+            else:
+                self.obs1.append(obs_next); self.state1.append(state_next)
+                self.don1.append(don_next)
+        self._trim()
 
-    def push(self, obs, acts, logp, rew, val, don, hid, state):
-        self.obs.append(obs)
-        self.acts.append(acts)
-        self.logp.append(logp)
-        self.rew.append(rew)
-        self.val.append(val)
-        self.don.append(don)
-        self.hid.append(hid)
-        self.state.append(state)
+    def _trim(self):
+        while len(self.obs) > self.cap:
+            self.obs.pop(0); self.acts.pop(0); self.rews.pop(0)
+            self.state.pop(0); self.don.pop(0)
+            self.obs1.pop(0); self.state1.pop(0); self.don1.pop(0)
 
-    def compute_targets(self, last_val, last_don, last_state, next_q_tot_fn):
-        """Double-Q target: Q_tot_target = sum_i r_i + gamma * (max over next joint Q_tot).
-        `next_q_tot_fn(next_actions_per_agent)` returns the target-network Q_tot for the
-        greedy next actions. We compute the TD target per-env (Q_tot over K*... -> aggregate).
+    def __len__(self):
+        return len(self.obs)
 
-        Returns:
-          q_tot: (T, K) joint Q_tot per env (from online mixer, using taken actions)
-          q_tot_target: (T, K) bootstrap targets
-          q_taken: (T, N*K) per-agent Q at taken action (for the mixer input)
-          state_seq: (T, K, state_dim)
-          obs_seq, acts_seq, logp_seq, hid_seq: (T, ...)
-        """
-        T = len(self.don)
-        B = self.n_agents * self.n_envs
-        rew = torch.stack(self.rew)          # (T, N, K)
-        don = torch.stack(self.don)          # (T, N, K)
-        val = torch.stack(self.val)          # (T, N, K) -- per-agent Q(s,a) for taken a
-        state_seq = torch.stack(self.state)  # (T, K, S)
+    def sample(self, batch, device):
+        import random
+        idx = random.sample(range(len(self.obs)), min(batch, len(self.obs)))
+        obs = torch.stack([self.obs[i] for i in idx]).to(device)
+        acts = torch.stack([self.acts[i] for i in idx]).to(device)
+        rews = torch.stack([self.rews[i] for i in idx]).to(device)
+        state = torch.stack([self.state[i] for i in idx]).to(device)
+        don = torch.stack([self.don[i] for i in idx]).to(device)
+        obs1 = torch.stack([self.obs1[i] for i in idx]).to(device)
+        state1 = torch.stack([self.state1[i] for i in idx]).to(device)
+        don1 = torch.stack([self.don1[i] for i in idx]).to(device)
+        return obs, acts, rews, state, don, obs1, state1, don1
 
-        # per-env summed local reward (N agents) at each step: (T, K)
-        rew_e = rew.sum(dim=0)               # (T, K)
-        don_e = don.any(dim=0).float()       # (T, K) env done if ANY agent done
 
-        # Bootstrap: last_val is per-agent Q (N*K,) ; last_state is (K,S).
-        # Q_tot at the bootstrap step via next_q_tot_fn(next_actions greedy).
-        # We compute the standard n-step return: R_t = sum_{t'=t}^{T-1} gamma^{t'-t} r_{t'}
-        # plus gamma^{T-t} * (1-done) * next_Q_tot.
-        q_tot_target = torch.zeros(T, self.n_envs, device=rew.device)
-        # iterate backward over T to build discounted returns
-        ret = torch.zeros(self.n_envs, device=rew.device)
-        discount = torch.ones(self.n_envs, device=rew.device)
-        # last bootstrap (double-Q): use target net next-greedy joint Q_tot
-        next_bootstrap = next_q_tot_fn(last_state, last_val.reshape(self.n_agents, self.n_envs).T)  # (K,)
-        ret = (1.0 - last_don.float()) * next_bootstrap
-        for t in reversed(range(T)):
-            ret = rew_e[t] + self.gamma * ret * (1.0 - don_e[t])
-            q_tot_target[t] = ret
-        return q_tot_target, val, state_seq, rew_e
+def qmix_update(policy, mixer, target_mixer, target_policy, replay, opt, device,
+                n, k, nact, gamma=0.99, batch=512, epochs=4,
+                ent_coef=0.05, ent_floor=0.5, max_grad_norm=0.5):
+    """Replay-based double-Q TD update. Samples minibatches from `replay`, recomputes
+    the double-Q target each epoch (target policy+mixer are slow/polyak), so rare joint
+    events are seen many times and the per-agent Q-heads differentiate.
+
+    Returns (td_err_mean, ent_mean).
+    """
+    if len(replay) < batch:
+        return 0.0, 2.56
+    for _ in range(epochs):
+        obs, acts, rews, state, don, obs1, state1, don1 = replay.sample(batch, device)
+        B, n_, k_ = obs.shape[0], obs.shape[1], obs.shape[2]
+        # Treat each (sampled transition, parallel env) as one mixer batch element.
+        # obs (B,n,k,OBS) -> (B*k, n, OBS); forward_q wants (N*K', OBS) with hidden (N,K',H)
+        obs_f = obs.reshape(B * k_, n_, -1)                       # (B*k, n, OBS)
+        obs1_f = obs1.reshape(B * k_, n_, -1)
+        q = policy.forward_q(obs_f.reshape(B * k_ * n_, -1),
+                              torch.zeros(n, B * k_, policy.gru_hidden, device=device)
+                              )[0].reshape(B * k_ * n_, nact)      # (B*k*n, NACT)
+        q = q.reshape(B * k_, n_, nact)                           # (B*k, n, NACT)
+        # taken-action Q per agent: acts (B,n,k) -> (B*k, n)
+        acts_r = acts.permute(0, 2, 1).reshape(B * k_, n_)        # (B*k, n)
+        qt = q.gather(2, acts_r.unsqueeze(-1)).squeeze(-1)        # (B*k, n)
+        q_tot = mixer(qt, state.reshape(B * k_, -1))              # (B*k,)
+        # double-Q target: greedy next actions from TARGET policy, mixed by TARGET mixer
+        with torch.no_grad():
+            qn = target_policy.forward_q(obs1_f.reshape(B * k_ * n_, -1),
+                                torch.zeros(n, B * k_, policy.gru_hidden, device=device)
+                                )[0].reshape(B * k_ * n_, nact).reshape(B * k_, n_, nact)
+            nxt_a = qn.argmax(dim=-1)                             # (B*k, n)
+            qn_greedy = qn.gather(2, nxt_a.unsqueeze(-1)).squeeze(-1)  # (B*k, n)
+            q_tot_next = target_mixer(qn_greedy, state1.reshape(B * k_, -1))  # (B*k,)
+            rew_e = rews.sum(dim=1).reshape(B * k_)               # (B*k,) local reward summed over agents
+            done_e = don1.any(dim=1).reshape(B * k_).float()      # (B*k,)
+            target = rew_e + gamma * q_tot_next * (1.0 - done_e)
+        loss_td = F.mse_loss(q_tot, target.detach())
+        # entropy (penalty: push Q-heads to peak once rewarding actions get positive Q)
+        p = torch.softmax(q, dim=-1)
+        ent_mean = -(p * p.log()).sum(dim=-1).mean()
+        loss = loss_td + ent_coef * ent_mean
+        if ent_floor and ent_floor > 0.0:
+            loss = loss + 0.1 * torch.clamp(ent_floor - ent_mean, min=0.0)
+        opt.zero_grad(); loss.backward()
+        torch.nn.utils.clip_grad_norm_(list(policy.parameters()) + list(mixer.parameters()),
+                                       max_grad_norm)
+        opt.step()
+    return float((q_tot - target.detach()).abs().mean().detach().cpu()), \
+           float(ent_mean.detach().cpu())

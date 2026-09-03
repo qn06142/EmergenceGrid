@@ -139,6 +139,18 @@ class EmergenceGrid:
                              trait_approach_bonus=0.15,
                              gate_approach_bonus=0.2,
                              sync_bonus=0.3, sync_radius=6.0),
+            # 'gc_joint' = gc_dense PLUS the dense JOINT-GATE credit (the QMIX lever):
+            # pays every step a strong agent is adjacent to a gate, scaled by (m-1) other
+            # strong pushers on that gate. This is the non-flat reward the QMIX mixer needs
+            # to propagate into the per-agent Q-heads (QMIX diagnosis: flat local reward ->
+            # uniform Q-heads -> ent pinned at max -> 0 gates). Centralizing value alone
+            # wasn't enough; this adds the dense joint signal.
+            'gc_joint': dict(trait_match_bonus=0.4, mutate_gated_gain=8.0,
+                             wrong_trait_pen=2.5, gate_prox_bonus=0.3,
+                             trait_approach_bonus=0.15,
+                             gate_approach_bonus=0.2,
+                             sync_bonus=0.3, sync_radius=6.0,
+                             joint_gate_bonus=0.5, gate_nav_bonus=0.3),
         }
         if reward_preset not in _PRESETS:
             raise ValueError(f"unknown reward_preset={reward_preset!r}")
@@ -152,7 +164,9 @@ class EmergenceGrid:
             gate_prox_bonus=0.0,       # G: dense + for strong(>=gate thr) & adjacent to gate
             trait_approach_bonus=0.0,  # D: dist-decay toward eatable gated food (when trait matches)
             gate_approach_bonus=0.0,   # D: dist-decay toward gate for strong agents (strength/bar)
-            sync_bonus=0.0, sync_radius=6.0)  # D: reward strong teammates co-locating at a gate
+            sync_bonus=0.0, sync_radius=6.0,  # D: reward strong teammates co-locating at a gate
+            joint_gate_bonus=0.0,  # J: dense joint-gate credit (gc_joint preset)
+            gate_nav_bonus=0.0)    # N: unconditional gate-navigation (decouple nav from strength)
         self.reward_params.update(_PRESETS[reward_preset])
         self._apply_reward_params()
 
@@ -185,7 +199,8 @@ class EmergenceGrid:
             rp['trait_mut_pen_gated'], rp['gate_gain'], rp['trait_match_bonus'],
             rp['mutate_gated_gain'], rp['wrong_trait_pen'],
             rp['trait_approach_bonus'], rp['gate_approach_bonus'],
-            rp['sync_bonus'], rp['sync_radius'])
+            rp['sync_bonus'], rp['sync_radius'],
+            rp['joint_gate_bonus'], rp['gate_nav_bonus'])
         self._sim.set_gate_prox_bonus(rp['gate_prox_bonus'])
         self._sim.set_step_frac(getattr(self, 'step_frac', 0.0))
 

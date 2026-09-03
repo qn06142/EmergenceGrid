@@ -157,7 +157,7 @@ def run_qmix(n=4, grid=64, k=4, nstep=32, nupd=400, seed=42, log_every=25,
              gru_hidden=256, head_dim=256, ent_coef=0.05, ent_floor=0.5,
              reward_preset='gc_dense', gate_thresh=0.6, gate_thresh_end=0.95,
              gate_thresh_mode='linear'):
-    from qmix import QMIXMixer, QMIXBuffer
+    from qmix import QMIXMixer, ReplayBuffer, qmix_update
     from env import EmergenceGrid
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -185,13 +185,14 @@ def run_qmix(n=4, grid=64, k=4, nstep=32, nupd=400, seed=42, log_every=25,
     target_mixer = QMIXMixer(state_dim, n, embed_dim=32, mixing_dim=16,
                              hypernet_embed=64).to(device)
     target_mixer.load_state_dict(mixer.state_dict())
+    target_policy = AgentPolicyBatch(n).to(device)
+    target_policy.load_state_dict(policy.state_dict())
     opt = torch.optim.Adam(list(policy.parameters()) + list(mixer.parameters()),
                            lr=lr, eps=1e-5)
     rew_norms = [RewardNormalizer(clip=10.0) for _ in range(n)]
-    buf = QMIXBuffer(n_agents=n, n_envs=k, n_steps=nstep)
+    replay = ReplayBuffer(capacity=60000)
     hid = torch.zeros(n, k, H, device=device)
     obs_now = [envs[e].reset() for e in range(k)]
-    ep_rew = [[0.0] * n for _ in range(k)]
 
     for upd in range(nupd):
         g = gate_schedule(upd, nupd, gate_thresh, gate_thresh_end, gate_thresh_mode)
@@ -199,7 +200,8 @@ def run_qmix(n=4, grid=64, k=4, nstep=32, nupd=400, seed=42, log_every=25,
             envs[e].set_gate_threshold(g)
         upd_gateopen = 0
 
-        # ---- rollout ----
+        # ---- rollout (collect transitions) ----
+        rollout = dict(obs=[], acts=[], rews=[], state=[], don=[])
         for t in range(nstep):
             obs_b = torch.as_tensor(np.concatenate(obs_now, axis=0), dtype=torch.float32,
                                     device=device)                  # (N*K, Obs)
@@ -208,7 +210,6 @@ def run_qmix(n=4, grid=64, k=4, nstep=32, nupd=400, seed=42, log_every=25,
             q_all = q_all.view(n, k, NACT)                          # (N, K, NACT)
             eps = max(0.05, 0.2 * (1.0 - upd / max(nupd - 1, 1)))
             acts = torch.zeros(n, k, dtype=torch.long, device=device)
-            qtaken = torch.zeros(n, k, device=device)
             for i in range(n):
                 for e in range(k):
                     qi = q_all[i, e]
@@ -217,7 +218,6 @@ def run_qmix(n=4, grid=64, k=4, nstep=32, nupd=400, seed=42, log_every=25,
                     else:
                         a = int(qi.argmax().item())
                     acts[i, e] = a
-                    qtaken[i, e] = qi[a]
             rews = np.zeros((n, k), dtype=np.float32)
             dones = np.zeros((n, k), dtype=bool)
             states = np.zeros((k, state_dim), dtype=np.float32)
@@ -235,106 +235,47 @@ def run_qmix(n=4, grid=64, k=4, nstep=32, nupd=400, seed=42, log_every=25,
                 for i in range(n):
                     rews[i, e] = rew_norms[i].normalize(float(r[i]))
                     dones[i, e] = bool(d[i])
-                    ep_rew[e][i] += r[i]
                 next_obs.append(o)
                 states[e] = envs[e].global_state().flatten()[:state_dim]
-            buf.push(obs_b.detach().view(n, k, -1), acts, None,
-                     torch.from_numpy(rews), qtaken, torch.from_numpy(dones),
-                     hid.detach(), torch.from_numpy(states))
+            rollout['obs'].append(obs_b.detach().view(n, k, -1).cpu())
+            rollout['acts'].append(acts.detach().cpu())
+            rollout['rews'].append(torch.from_numpy(rews))
+            rollout['state'].append(torch.from_numpy(states))
+            rollout['don'].append(torch.from_numpy(dones))
             hid = h_new.detach()
             obs_now = next_obs
+        # final next-obs/state/done for the last transition's bootstrap
+        obs_next = torch.as_tensor(np.concatenate(obs_now, axis=0), dtype=torch.float32,
+                                   device='cpu').view(n, k, -1)
+        state_next = torch.stack([torch.from_numpy(envs[e].global_state().flatten()[:state_dim])
+                                  for e in range(k)])
+        don_next = torch.stack([torch.from_numpy(np.array(
+            [False] * n, dtype=bool)) for _ in range(k)]).T  # (n, k) to match rollout['don']
 
-        # ---- QMIX double-Q update ----
-        loss, td_err, ent_mean = qmix_update(policy, mixer, target_mixer, buf, opt, device,
-                                   n, k, nstep, NACT, ent_coef=ent_coef,
-                                   ent_floor=ent_floor, gamma=0.99, max_grad_norm=0.5)
-        buf.reset()
+        # ---- add rollout to replay, then replay double-Q updates ----
+        replay.add_rollout(rollout, obs_next, state_next, don_next)
+        td_err, ent_mean = qmix_update(policy, mixer, target_mixer, target_policy, replay,
+                                       opt, device, n, k, NACT, ent_coef=ent_coef,
+                                       ent_floor=ent_floor, gamma=0.99,
+                                       batch=min(64, max(32, len(replay))),
+                                       epochs=2, max_grad_norm=0.5)
         with torch.no_grad():
             for tp, mp in zip(target_mixer.parameters(), mixer.parameters()):
                 tp.data.mul_(0.995).add_(mp.data, alpha=0.005)
+            for tp, pp in zip(target_policy.parameters(), policy.parameters()):
+                tp.data.mul_(0.995).add_(pp.data, alpha=0.005)
 
         if log_every and (upd % log_every == 0 or upd == nupd - 1):
             amax = int(acts[0, 0].item())
-            print(f"upd {upd:4d} | gate {g:.2f} | loss {loss:.4f} td {td_err:.3f} | "
+            print(f"upd {upd:4d} | gate {g:.2f} | td {td_err:.3f} | "
                   f"gateopen {upd_gateopen} | act0 {amax} | "
-                  f"ent {ent_mean:.2f}", flush=True)
+                  f"ent {ent_mean:.2f} | replay {len(replay)}", flush=True)
         if save_every and (upd % save_every == 0 or upd == nupd - 1):
             ps = os.path.join(ckpt_dir, f"{exp_name}_policy_step{upd}.pt")
             ts = os.path.join(ckpt_dir, f"{exp_name}_mixer_step{upd}.pt")
             torch.save(policy.state_dict(), ps)
             torch.save(mixer.state_dict(), ts)
     print("[qmix] training complete", flush=True)
-
-
-def qmix_update(policy, mixer, target_mixer, buf, opt, device, n, k, T, nact,
-                ent_coef=0.05, ent_floor=0.0, gamma=0.99, max_grad_norm=0.5):
-    """One QMIX (double-Q TD) update over the rollout. Returns (mean_loss, mean_td_err)."""
-    obs = torch.stack(buf.obs).to(device)          # (T, N, K, Obs)
-    rew = torch.stack(buf.rew).to(device).sum(dim=1)  # (T, K) summed LOCAL reward over agents
-    don = torch.stack(buf.don).to(device)           # (T, N, K)
-    don_e = don.any(dim=1).float()                  # (T, K) env-level done
-    qtaken = torch.stack(buf.val).to(device)        # (T, N, K) taken-action Q per agent
-    states = torch.stack(buf.state).to(device)       # (T, K, S)
-
-    # Greedy next Q per agent from target policy (the online net under no_grad is a
-    # cheap proxy; a true target net needs a full target_policy copy -- wired via
-    # polyak below on the mixer, and the online forward_q for next actions is fine
-    # for n-step returns this task demands).
-    with torch.no_grad():
-        flat_last = obs[-1].reshape(n * k, -1)       # (N*K, Obs)
-        q_last, _ = policy.forward_q(flat_last)      # (N*K, NACT)
-        q_last = q_last.view(n, k, nact)
-        next_q = q_last.max(dim=-1)[0]               # (N, K) greedy next Q
-        # target Q_tot at the bootstrap step (tail).
-        sb = states[-1]                              # (K, S)
-        next_q_per_env = next_q.t()                  # (K, N) per-agent greedy Q
-        q_tot_next = torch.zeros(k, device=device)
-        for e in range(k):
-            q_tot_next[e] = target_mixer(next_q_per_env[e:e+1], sb[e:e+1]).squeeze()
-        q_tot_next = q_tot_next * (1.0 - don_e[-1])   # (K,)
-
-    # N-step discounted returns (double-Q): R_t = sum_{t'=t}^{T-1} γ^{t'-t} r + γ^{...} q_tot_next
-    returns = torch.zeros(T, k, device=device)
-    R = q_tot_next
-    for t in reversed(range(T)):
-        R = rew[t] + gamma * R * (1.0 - don_e[t])
-        returns[t] = R.detach()
-
-    # Online Q_tot at each (t, e) via the mixer over the taken-action Q.
-    q_tot = torch.zeros(T, k, device=device)
-    for t in range(T):
-        for e in range(k):
-            qa = qtaken[t, :, e]                      # (N,)
-            s = states[t, e]                          # (S,)
-            q_tot[t, e] = mixer(qa.unsqueeze(0), s.unsqueeze(0)).squeeze()
-
-    td_err = q_tot - returns
-    loss_td = F.mse_loss(q_tot, returns)
-    # Recompute per-agent Q + softmax entropy on the SAME taken actions so the
-    # entropy bonus differentiates to the policy (the rollout's `ent` was no_grad).
-    # buf.obs / buf.hid are (T, N, K, *) agent-major per env. forward_q expects
-    # obs (N*K', Obs) row = agent i in "env" e' and hidden (N, K', H). Merge time
-    # into the env batch: K' = K*T.
-    obs_agent_major = obs.permute(1, 2, 0, 3).reshape(n * k * T, -1)  # (N*K*T, Obs)
-    flat_hid = torch.stack(buf.hid, dim=0).permute(1, 2, 0, 3).reshape(n, k * T, -1)  # (N, K*T, H)
-    q_recompute, _ = policy.forward_q(obs_agent_major, flat_hid)     # (N*K*T, NACT)
-    q_recompute = q_recompute.reshape(n, k, T, nact).permute(2, 0, 1, 3)  # (T, N, K, NACT)
-    # entropy per (t, agent, env) from the Q-softmax (already summed over actions):
-    p = torch.softmax(q_recompute, dim=-1)              # (T, N, K, NACT)
-    ent_map = -(p * p.log()).sum(dim=-1)               # (T, N, K) per-agent entropy
-    ent_mean = ent_map.mean()
-    loss = loss_td - ent_coef * ent_mean
-    if ent_floor and ent_floor > 0.0:
-        # Entropy FLOOR: penalize entropy below the floor (stops collapse to a single
-        # action), matching the IPPO discipline in ppo_update_agent. Differentiable.
-        loss = loss + 0.1 * torch.clamp(ent_floor - ent_mean, min=0.0)
-    opt.zero_grad()
-    loss.backward()
-    torch.nn.utils.clip_grad_norm_(list(policy.parameters()) + list(mixer.parameters()),
-                                   max_grad_norm)
-    opt.step()
-    return float(loss_td.detach().cpu()), float(td_err.abs().mean().detach().cpu()), \
-           float(ent_mean.detach().cpu())
 
 
 def run(n=16, grid=128, k=8, nstep=64, nupd=2000, seed=12345, log_every=50,
@@ -790,7 +731,7 @@ if __name__ == '__main__':
                         'MUTATE near an unlocked gate?) from CREDIT (is mean advantage on '
                         'that action positive?).')
     ap.add_argument('--reward_preset', type=str, default='default',
-                   choices=['default', 'gc', 'gc_dense'],
+                   choices=['default', 'gc', 'gc_dense', 'gc_joint'],
                    help="Reward-density lever. 'gc' = G+C preset: raises trait_match_bonus "
                         "(bridge mutate->eat), mutate_gated_gain, sharpens wrong_trait_pen, "
                         "and adds dense gate_prox_bonus for strong+adjacent-to-gate. "
